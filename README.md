@@ -1,24 +1,24 @@
 # Mobile Screenshotter for Figma
 
-Figma plugin with local Express server to capture screenshots from Android devices and insert them directly into your Figma file.
+Figma plugin with local Express server to capture screenshots from Android and iOS devices and insert them directly into your Figma file.
 
-## iOS Support (Advanced Users)
+> **Note:** You're on the `ios-support` branch which includes experimental iPhone/iPad support. For Android-only (simpler setup), see the `main` branch.
 
-**An `ios-support` branch is available** with experimental iPhone/iPad support, but it has significant requirements:
+## iOS Requirements (Advanced Users)
+
+iOS support has significant requirements:
 
 - ⚠️ **Requires Xcode** (~12-15GB download) for Developer disk images
 - Requires `libimobiledevice` (`brew install libimobiledevice`)
 - Device must be trusted and have Developer image mounted via Xcode
 
-**To use iOS support:**
-```bash
-git checkout ios-support
-cd server
-npm install  # Installs additional dependencies
-npm start
-```
-
-Due to these heavyweight requirements, **the `main` branch remains Android-only** for simplicity and accessibility.
+**To use iOS:**
+1. Install Xcode from the Mac App Store
+2. Install libimobiledevice: `brew install libimobiledevice`
+3. Connect your iPhone/iPad via USB
+4. Open Xcode → Window → Devices and Simulators
+5. Select your device and wait for "Preparing device for development..." to complete
+6. Trust the device when prompted
 
 ## Prerequisites
 
@@ -64,12 +64,14 @@ npm start
 
 You should see:
 ```
-🚀 Android Screenshot Server running on http://localhost:3000
-📱 Make sure your Android device is connected via ADB
+🚀 Mobile Screenshot Server running on http://localhost:3000
+📱 Connect your Android (via ADB) or iOS (via USB) device
 💡 Test connection: http://localhost:3000/health
 ```
 
-### 2. Connect Your Android Device
+### 2. Connect Your Device
+
+**For Android:**
 1. Plug in your Android device via USB
 2. Unlock your device
 3. Allow USB debugging when prompted
@@ -78,6 +80,16 @@ You should see:
    adb devices
    ```
    Should show your device listed
+
+**For iOS:**
+1. Complete the iOS Requirements steps above (Xcode, libimobiledevice, Developer image mounting)
+2. Plug in your iPhone/iPad via USB
+3. Trust the computer when prompted
+4. Verify connection:
+   ```bash
+   idevice_id -l
+   ```
+   Should show your device's UDID
 
 ### 3. Use the Plugin
 1. Open any Figma file
