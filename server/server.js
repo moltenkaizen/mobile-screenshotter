@@ -73,18 +73,40 @@ app.get('/resolution', async (req, res) => {
       return res.status(400).json({ error: 'No Android device connected' });
     }
 
-    // Get physical size
+    // Get physical size (always in default/portrait orientation)
     const { stdout: sizeOutput } = await execAsync('adb shell wm size');
     const sizeMatch = sizeOutput.match(/(\d+)x(\d+)/);
     if (!sizeMatch) throw new Error('Could not parse screen size');
-    const physicalWidth = parseInt(sizeMatch[1]);
-    const physicalHeight = parseInt(sizeMatch[2]);
+    let physicalWidth = parseInt(sizeMatch[1]);
+    let physicalHeight = parseInt(sizeMatch[2]);
 
     // Get density
     const { stdout: densityOutput } = await execAsync('adb shell wm density');
     const densityMatch = densityOutput.match(/density:\s*(\d+)/);
     if (!densityMatch) throw new Error('Could not parse screen density');
     const density = parseInt(densityMatch[1]);
+
+    // Get current rotation (0=portrait, 1=landscape-left, 2=upside-down, 3=landscape-right)
+    let rotation = 0;
+    try {
+      const { stdout: rotationOutput } = await execAsync('adb shell dumpsys window | grep mCurrentRotation');
+      // Output looks like: "mCurrentRotation=ROTATION_90" or just "ROTATION_90"
+      const rotationMatch = rotationOutput.match(/ROTATION_(\d+)/);
+      if (rotationMatch) {
+        const rotationDegrees = parseInt(rotationMatch[1]);
+        // Convert degrees to rotation number: 0=0°, 90=1, 180=2, 270=3
+        rotation = rotationDegrees / 90;
+      }
+    } catch (e) {
+      // If rotation fetch fails, assume portrait (0)
+      rotation = 0;
+    }
+
+    // If device is in landscape (rotation 1 or 3), swap width and height
+    const isLandscape = (rotation === 1 || rotation === 3);
+    if (isLandscape) {
+      [physicalWidth, physicalHeight] = [physicalHeight, physicalWidth];
+    }
 
     // Calculate logical resolution
     const scale = density / 160;
@@ -96,7 +118,9 @@ app.get('/resolution', async (req, res) => {
       physical: { width: physicalWidth, height: physicalHeight },
       logical: { width: logicalWidth, height: logicalHeight },
       density: density,
-      scale: scale
+      scale: scale,
+      rotation: rotation,
+      isLandscape: isLandscape
     });
   } catch (error) {
     console.error('Resolution error:', error);
