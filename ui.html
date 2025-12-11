@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 12px;
+    }
+    h2 {
+      margin: 0 0 12px 0;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .status {
+      padding: 8px 12px;
+      border-radius: 4px;
+      margin-bottom: 12px;
+      font-size: 11px;
+    }
+    .status.connected {
+      background: #e6f7e6;
+      color: #0d5f0d;
+    }
+    .status.disconnected {
+      background: #ffe6e6;
+      color: #8f0000;
+    }
+    .status.checking {
+      background: #fff4e6;
+      color: #8f5000;
+    }
+    button {
+      width: 100%;
+      padding: 8px 12px;
+      border: none;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-bottom: 8px;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .primary {
+      background: #0d99ff;
+      color: white;
+    }
+    .primary:hover:not(:disabled) {
+      background: #0b7fd9;
+    }
+    .secondary {
+      background: #f0f0f0;
+      color: #333;
+    }
+    .secondary:hover:not(:disabled) {
+      background: #e0e0e0;
+    }
+    .device-info {
+      font-size: 11px;
+      color: #666;
+      margin-bottom: 12px;
+      padding: 6px;
+      background: #f9f9f9;
+      border-radius: 3px;
+    }
+    .error {
+      color: #d00;
+      font-size: 11px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h2>📱 Mobile Screenshotter</h2>
+
+  <div id="status" class="status checking">
+    Checking server connection...
+  </div>
+
+  <div id="deviceInfo" class="device-info" style="display: none;">
+    Device: <span id="deviceId">-</span>
+  </div>
+
+  <button id="screenshot" class="primary" disabled>
+    Take Screenshot
+  </button>
+
+  <button id="checkConnection" class="secondary">
+    Check Connection
+  </button>
+
+  <div id="error" class="error" style="display: none;"></div>
+
+  <script>
+    const SERVER_URL = 'http://localhost:3000';
+    let isConnected = false;
+
+    // Check server and device status
+    async function checkConnection() {
+      const statusEl = document.getElementById('status');
+      const deviceInfoEl = document.getElementById('deviceInfo');
+      const deviceIdEl = document.getElementById('deviceId');
+      const screenshotBtn = document.getElementById('screenshot');
+      const errorEl = document.getElementById('error');
+
+      errorEl.style.display = 'none';
+      statusEl.className = 'status checking';
+      statusEl.textContent = 'Checking connection...';
+
+      try {
+        // Check server
+        const healthRes = await fetch(`${SERVER_URL}/health`);
+        if (!healthRes.ok) throw new Error('Server not responding');
+
+        // Check device
+        const deviceRes = await fetch(`${SERVER_URL}/device`);
+        const deviceData = await deviceRes.json();
+
+        if (deviceData.connected) {
+          statusEl.className = 'status connected';
+          statusEl.textContent = '✓ Server running, device connected';
+          deviceInfoEl.style.display = 'block';
+          deviceIdEl.textContent = deviceData.deviceId;
+          screenshotBtn.disabled = false;
+          isConnected = true;
+        } else {
+          statusEl.className = 'status disconnected';
+          statusEl.textContent = '✗ Server running, no device connected';
+          deviceInfoEl.style.display = 'none';
+          screenshotBtn.disabled = true;
+          isConnected = false;
+          showError('Please connect your Android device via USB and enable USB debugging');
+        }
+      } catch (error) {
+        statusEl.className = 'status disconnected';
+        statusEl.textContent = '✗ Server not running';
+        deviceInfoEl.style.display = 'none';
+        screenshotBtn.disabled = true;
+        isConnected = false;
+        showError('Start the server: cd server && npm install && npm start');
+      }
+    }
+
+    function showError(message) {
+      const errorEl = document.getElementById('error');
+      errorEl.textContent = message;
+      errorEl.style.display = 'block';
+    }
+
+    // Take screenshot
+    async function takeScreenshot() {
+      const screenshotBtn = document.getElementById('screenshot');
+      const errorEl = document.getElementById('error');
+
+      errorEl.style.display = 'none';
+      screenshotBtn.disabled = true;
+      screenshotBtn.textContent = 'Taking screenshot...';
+
+      try {
+        const response = await fetch(`${SERVER_URL}/screenshot`);
+        const data = await response.json();
+
+        if (data.success) {
+          // Send image data to plugin main thread
+          parent.postMessage({
+            pluginMessage: {
+              type: 'create-screenshot',
+              imageData: data.image
+            }
+          }, '*');
+
+          screenshotBtn.textContent = '✓ Screenshot captured!';
+          setTimeout(() => {
+            screenshotBtn.textContent = 'Take Screenshot';
+            screenshotBtn.disabled = false;
+          }, 1500);
+        } else {
+          throw new Error(data.error || 'Unknown error');
+        }
+      } catch (error) {
+        showError('Failed to take screenshot: ' + error.message);
+        screenshotBtn.textContent = 'Take Screenshot';
+        screenshotBtn.disabled = false;
+      }
+    }
+
+    // Event listeners
+    document.getElementById('screenshot').onclick = takeScreenshot;
+    document.getElementById('checkConnection').onclick = checkConnection;
+
+    // Check connection on load
+    checkConnection();
+  </script>
+</body>
+</html>
