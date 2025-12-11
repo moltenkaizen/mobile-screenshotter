@@ -29,15 +29,79 @@ app.get('/device', async (req, res) => {
     }
 
     const deviceInfo = lines[0].split('\t');
+
+    // Get device manufacturer and model
+    let manufacturer = 'Unknown';
+    let model = 'Unknown';
+    try {
+      const { stdout: mfgOutput } = await execAsync('adb shell getprop ro.product.manufacturer');
+      manufacturer = mfgOutput.trim();
+    } catch (e) {
+      // If getprop fails, use default
+    }
+
+    try {
+      const { stdout: modelOutput } = await execAsync('adb shell getprop ro.product.model');
+      model = modelOutput.trim();
+    } catch (e) {
+      // If getprop fails, use default
+    }
+
     res.json({
       connected: true,
       deviceId: deviceInfo[0],
-      status: deviceInfo[1]
+      status: deviceInfo[1],
+      manufacturer: manufacturer,
+      model: model
     });
   } catch (error) {
     res.status(500).json({
       connected: false,
       error: 'ADB not found or not in PATH',
+      message: error.message
+    });
+  }
+});
+
+// Get device resolution endpoint
+app.get('/resolution', async (req, res) => {
+  try {
+    // Check device connected
+    const { stdout: devicesOutput } = await execAsync('adb devices');
+    const deviceLines = devicesOutput.split('\n').filter(line => line.trim() && !line.includes('List of devices'));
+    if (deviceLines.length === 0) {
+      return res.status(400).json({ error: 'No Android device connected' });
+    }
+
+    // Get physical size
+    const { stdout: sizeOutput } = await execAsync('adb shell wm size');
+    const sizeMatch = sizeOutput.match(/(\d+)x(\d+)/);
+    if (!sizeMatch) throw new Error('Could not parse screen size');
+    const physicalWidth = parseInt(sizeMatch[1]);
+    const physicalHeight = parseInt(sizeMatch[2]);
+
+    // Get density
+    const { stdout: densityOutput } = await execAsync('adb shell wm density');
+    const densityMatch = densityOutput.match(/density:\s*(\d+)/);
+    if (!densityMatch) throw new Error('Could not parse screen density');
+    const density = parseInt(densityMatch[1]);
+
+    // Calculate logical resolution
+    const scale = density / 160;
+    const logicalWidth = Math.round(physicalWidth / scale);
+    const logicalHeight = Math.round(physicalHeight / scale);
+
+    res.json({
+      success: true,
+      physical: { width: physicalWidth, height: physicalHeight },
+      logical: { width: logicalWidth, height: logicalHeight },
+      density: density,
+      scale: scale
+    });
+  } catch (error) {
+    console.error('Resolution error:', error);
+    res.status(500).json({
+      error: 'Failed to get screen resolution',
       message: error.message
     });
   }

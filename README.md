@@ -118,7 +118,7 @@ mobile-screenshotter/
 
 ## Future Enhancements
 
-- iOS support (using `libimobiledevice`)
+- **iOS support** (using `libimobiledevice`) - [See detailed implementation plan](docs/ios-support-plan.md)
 - Screenshot history
 - Automatic device detection
 - Multiple device support
