@@ -1,6 +1,24 @@
 # Mobile Screenshotter for Figma
 
-Quick and dirty Figma plugin to capture screenshots from Android (and soon iOS) devices and insert them directly into your Figma file.
+Figma plugin with local Express server to capture screenshots from Android devices and insert them directly into your Figma file.
+
+## iOS Support (Advanced Users)
+
+**An `ios-support` branch is available** with experimental iPhone/iPad support, but it has significant requirements:
+
+- ⚠️ **Requires Xcode** (~12-15GB download) for Developer disk images
+- Requires `libimobiledevice` (`brew install libimobiledevice`)
+- Device must be trusted and have Developer image mounted via Xcode
+
+**To use iOS support:**
+```bash
+git checkout ios-support
+cd server
+npm install  # Installs additional dependencies
+npm start
+```
+
+Due to these heavyweight requirements, **the `main` branch remains Android-only** for simplicity and accessibility.
 
 ## Prerequisites
 
@@ -118,12 +136,10 @@ mobile-screenshotter/
 
 ## Future Enhancements
 
-- **iOS support** (using `libimobiledevice`) - [See detailed implementation plan](docs/ios-support-plan.md)
 - Screenshot history
-- Automatic device detection
-- Multiple device support
+- Multiple device support (both Android and iOS simultaneously)
 - Custom image naming
-- Organize screenshots into frames
+- Better iOS support (without requiring Xcode installation)
 
 ## Notes
 
