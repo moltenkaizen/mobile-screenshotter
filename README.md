@@ -2,23 +2,41 @@
 
 Figma plugin with local Express server to capture screenshots from Android and iOS devices and insert them directly into your Figma file.
 
-> **Note:** You're on the `ios-support` branch which includes experimental iPhone/iPad support. For Android-only (simpler setup), see the `main` branch.
+## iOS Requirements
 
-## iOS Requirements (Advanced Users)
+iOS support requires several steps to enable developer features:
 
-iOS support has significant requirements:
+### Prerequisites:
+- ⚠️ **Xcode** (~12-15GB download) - Required for DeveloperDiskImage mounting
+- **pymobiledevice3** - Python tool for iOS device communication
+- **Developer Mode** enabled on iOS device (iOS 16+)
 
-- ⚠️ **Requires Xcode** (~12-15GB download) for Developer disk images
-- Requires `libimobiledevice` (`brew install libimobiledevice`)
-- Device must be trusted and have Developer image mounted via Xcode
+### Setup Steps:
 
-**To use iOS:**
-1. Install Xcode from the Mac App Store
-2. Install libimobiledevice: `brew install libimobiledevice`
-3. Connect your iPhone/iPad via USB
-4. Open Xcode → Window → Devices and Simulators
-5. Select your device and wait for "Preparing device for development..." to complete
-6. Trust the device when prompted
+1. **Install Xcode** from the Mac App Store
+
+2. **Enable Developer Mode on iPhone/iPad:**
+   - Settings → Privacy & Security → Developer Mode → Enable
+   - Device will restart
+
+3. **Mount DeveloperDiskImage via Xcode:**
+   - Connect your iPhone/iPad via USB
+   - Open Xcode → Window → Devices and Simulators
+   - Select your device and wait for "Preparing device for development..." to complete
+   - Trust the computer when prompted
+   - *Note: This mounts the DeveloperDiskImage which enables developer features like screenshot capture*
+
+4. **Install pymobiledevice3:**
+   ```bash
+   pipx install pymobiledevice3
+   # or: pip3 install pymobiledevice3
+   ```
+
+5. **Start the iOS tunnel** (required for iOS 17+):
+   ```bash
+   sudo pymobiledevice3 remote start-tunnel
+   ```
+   Copy the `RSD Address` and `RSD Port` from the output - you'll need these when starting the server.
 
 ## Prerequisites
 
@@ -57,16 +75,22 @@ npm install
 ## Usage
 
 ### 1. Start the Server
+
+**For iOS users:** Make sure the pymobiledevice3 tunnel is running first (see iOS Requirements above).
+
 ```bash
 cd server
 npm start
 ```
+
+**If using iOS**, the server will prompt you to enter the RSD Address and Port from your tunnel.
 
 You should see:
 ```
 🚀 Mobile Screenshot Server running on http://localhost:3000
 📱 Connect your Android (via ADB) or iOS (via USB) device
 💡 Test connection: http://localhost:3000/health
+✓ Detected: [Your Device Name]
 ```
 
 ### 2. Connect Your Device
@@ -82,14 +106,14 @@ You should see:
    Should show your device listed
 
 **For iOS:**
-1. Complete the iOS Requirements steps above (Xcode, libimobiledevice, Developer image mounting)
-2. Plug in your iPhone/iPad via USB
-3. Trust the computer when prompted
+1. Complete the iOS Requirements steps above (Xcode, pymobiledevice3, Developer Mode, DeveloperDiskImage mounting)
+2. Start the tunnel: `sudo pymobiledevice3 remote start-tunnel`
+3. Start the server and enter the RSD connection info when prompted
 4. Verify connection:
    ```bash
-   idevice_id -l
+   pymobiledevice3 usbmux list
    ```
-   Should show your device's UDID
+   Should show your device details in JSON format
 
 ### 3. Use the Plugin
 1. Open any Figma file
@@ -104,16 +128,24 @@ You should see:
 - Make sure you ran `cd server && npm start`
 - Check that port 3000 is not in use
 
-### "No device connected"
+### "No device connected" (Android)
 - Run `adb devices` to verify your device is connected
 - Try `adb kill-server && adb start-server` to restart ADB
 - Make sure USB debugging is enabled on your Android device
 - Try a different USB cable (some cables are power-only)
 
-### "Failed to capture screenshot"
+### "No device connected" (iOS)
+- Make sure Developer Mode is enabled on your iPhone/iPad
+- Verify DeveloperDiskImage is mounted (open Xcode → Devices and Simulators)
+- Check tunnel is running: `sudo pymobiledevice3 remote start-tunnel`
+- Verify device shows up: `pymobiledevice3 usbmux list`
+- Restart the server and re-enter RSD connection info
+
+### "Failed to capture screenshot" (iOS)
 - Make sure your device is unlocked
+- Verify tunnel is running (you'll see "Tunnel not running" error if it stopped)
+- Check RSD connection info is correct
 - Some apps block screenshots (e.g., banking apps)
-- Try taking a screenshot manually first to verify your device allows it
 
 ### ADB not found
 - Install Android Platform Tools (see Prerequisites)
@@ -133,25 +165,28 @@ mobile-screenshotter/
 ├── ui.html            # Plugin UI
 ├── package.json       # Plugin dependencies
 ├── server/            # Local server
-│   ├── server.js      # Express server with ADB integration
-│   └── package.json   # Server dependencies
+│   ├── server.js      # Express server with ADB + pymobiledevice3 integration
+│   └── package.json   # Server dependencies (includes sharp for image optimization)
 └── README.md          # This file
 ```
 
 ## How It Works
 
-1. **Local Server**: Express server listens on `localhost:3000` and executes ADB commands
-2. **Figma Plugin UI**: Makes HTTP requests to the local server to trigger screenshots
-3. **ADB**: Captures screenshot from connected Android device
-4. **Server**: Returns screenshot as base64-encoded PNG
-5. **Plugin**: Creates image node in Figma with the screenshot data
+1. **Local Server**: Express server listens on `localhost:3000` and executes device commands
+2. **Device Detection**: Server detects Android (via ADB) or iOS (via pymobiledevice3) at startup
+3. **Figma Plugin UI**: Makes HTTP requests to the local server to trigger screenshots
+4. **Screenshot Capture**:
+   - Android: Uses ADB to capture and pull screenshot
+   - iOS: Uses pymobiledevice3 with tunnel connection
+5. **Optimization**: Server converts PNG to JPEG (85% quality) for 93% file size reduction
+6. **Transfer**: Returns screenshot as base64-encoded JPEG
+7. **Plugin**: Creates frame in Figma with the screenshot at logical or physical resolution
 
 ## Future Enhancements
 
 - Screenshot history
 - Multiple device support (both Android and iOS simultaneously)
 - Custom image naming
-- Better iOS support (without requiring Xcode installation)
 
 ## Notes
 
