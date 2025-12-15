@@ -4,17 +4,73 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
+const sharp = require('sharp');
 
 const execAsync = promisify(exec);
 const app = express();
 const PORT = 3000;
 
+// Store RSD params in memory (set via env vars or interactive prompt)
+let iosRSDConfig = {
+  address: process.env.IOS_RSD_ADDRESS || null,
+  port: process.env.IOS_RSD_PORT || null
+};
+
+// Store detected device info (set once at startup)
+let connectedDevice = {
+  type: null,        // 'android', 'ios', or null
+  connected: false,
+  id: null,
+  info: null         // Full device info for iOS (from usbmux list)
+};
+
+// Map iPhone ProductType to device specs
+const iPhoneSpecs = {
+  'iPhone16,1': { name: 'iPhone 15 Pro', width: 1179, height: 2556, scale: 3 },
+  'iPhone16,2': { name: 'iPhone 15 Pro Max', width: 1290, height: 2796, scale: 3 },
+  'iPhone15,4': { name: 'iPhone 15 Plus', width: 1290, height: 2796, scale: 3 },
+  'iPhone15,5': { name: 'iPhone 15', width: 1179, height: 2556, scale: 3 },
+  'iPhone15,2': { name: 'iPhone 14 Pro', width: 1179, height: 2556, scale: 3 },
+  'iPhone15,3': { name: 'iPhone 14 Pro Max', width: 1290, height: 2796, scale: 3 },
+  'iPhone14,7': { name: 'iPhone 14', width: 1170, height: 2532, scale: 3 },
+  'iPhone14,8': { name: 'iPhone 14 Plus', width: 1284, height: 2778, scale: 3 },
+  'iPhone14,2': { name: 'iPhone 13 Pro', width: 1170, height: 2532, scale: 3 },
+  'iPhone14,3': { name: 'iPhone 13 Pro Max', width: 1284, height: 2778, scale: 3 },
+  'iPhone13,2': { name: 'iPhone 12', width: 1170, height: 2532, scale: 3 },
+  'iPhone13,3': { name: 'iPhone 12 Pro', width: 1170, height: 2532, scale: 3 },
+  'iPhone13,4': { name: 'iPhone 12 Pro Max', width: 1284, height: 2778, scale: 3 },
+  // Add more as needed
+};
+
+function getFriendlyModelName(productType, deviceName) {
+  return iPhoneSpecs[productType]?.name || deviceName || productType || 'iPhone';
+}
+
+function getIOSResolution(productType) {
+  const specs = iPhoneSpecs[productType];
+  if (!specs) {
+    // Fallback: assume modern iPhone with @3x
+    return {
+      physical: { width: 1179, height: 2556 },
+      logical: { width: 393, height: 852 },
+      scale: 3
+    };
+  }
+
+  return {
+    physical: { width: specs.width, height: specs.height },
+    logical: { width: Math.round(specs.width / specs.scale), height: Math.round(specs.height / specs.scale) },
+    scale: specs.scale
+  };
+}
+
 // Enable CORS for Figma plugin
 app.use(cors());
 app.use(express.json());
 
-// Device type detection function
-async function detectDeviceType() {
+// Device type detection function (runs once at startup)
+async function detectAndStoreDevice() {
   // Try Android first
   try {
     const { stdout: adbOutput } = await execAsync('adb devices');
@@ -24,25 +80,70 @@ async function detectDeviceType() {
 
     if (androidDevices.length > 0) {
       const deviceId = androidDevices[0].split('\t')[0];
-      return { type: 'android', connected: true, id: deviceId };
+      connectedDevice = {
+        type: 'android',
+        connected: true,
+        id: deviceId,
+        info: null
+      };
+      return;
     }
   } catch (e) {
     // ADB not available or no devices
   }
 
-  // Try iOS
+  // Try iOS using pymobiledevice3
   try {
-    const { stdout: iosOutput } = await execAsync('idevice_id -l');
-    const iosDevices = iosOutput.split('\n').filter(line => line.trim());
-
-    if (iosDevices.length > 0) {
-      return { type: 'ios', connected: true, id: iosDevices[0] };
+    const { stdout: iosOutput } = await execAsync('pymobiledevice3 usbmux list');
+    // Parse JSON output from pymobiledevice3
+    const devices = JSON.parse(iosOutput);
+    if (devices && devices.length > 0) {
+      // Filter to USB-connected devices only
+      const usbDevice = devices.find(d => d.ConnectionType === 'USB');
+      if (usbDevice) {
+        connectedDevice = {
+          type: 'ios',
+          connected: true,
+          id: usbDevice.Identifier,
+          info: usbDevice  // Store full device info for later use
+        };
+        return;
+      }
     }
   } catch (e) {
-    // libimobiledevice not available or no devices
+    // pymobiledevice3 not available or no devices
   }
 
-  return { type: null, connected: false };
+  // No device found
+  connectedDevice = { type: null, connected: false, id: null, info: null };
+}
+
+// Check if iOS tunnel RSD params are configured
+function getIOSRSDParams() {
+  const address = iosRSDConfig.address;
+  const port = iosRSDConfig.port;
+
+  if (!address || !port) {
+    return {
+      configured: false,
+      address: null,
+      port: null,
+      instructions: 'iOS tunnel not configured. Please restart server to enter RSD values.'
+    };
+  }
+
+  return { configured: true, address, port };
+}
+
+// Build pymobiledevice3 command with RSD params
+function buildPymobiledevice3Command(baseCommand) {
+  const rsd = getIOSRSDParams();
+
+  if (!rsd.configured) {
+    throw new Error(rsd.instructions);
+  }
+
+  return `${baseCommand} --rsd ${rsd.address} ${rsd.port}`;
 }
 
 // Health check endpoint
@@ -52,13 +153,11 @@ app.get('/health', (req, res) => {
 
 // Check if device is connected (Android or iOS)
 app.get('/device', async (req, res) => {
-  const device = await detectDeviceType();
-
-  if (!device.connected) {
+  if (!connectedDevice.connected) {
     return res.json({ connected: false, message: 'No device connected' });
   }
 
-  if (device.type === 'android') {
+  if (connectedDevice.type === 'android') {
     try {
       // Get device manufacturer and model
       let manufacturer = 'Unknown';
@@ -80,7 +179,7 @@ app.get('/device', async (req, res) => {
       res.json({
         connected: true,
         deviceType: 'android',
-        deviceId: device.id,
+        deviceId: connectedDevice.id,
         manufacturer: manufacturer,
         model: model
       });
@@ -91,37 +190,26 @@ app.get('/device', async (req, res) => {
         message: error.message
       });
     }
-  } else if (device.type === 'ios') {
-    try {
-      const { stdout: deviceName } = await execAsync(`ideviceinfo -u ${device.id} -k DeviceName`);
-
-      res.json({
-        connected: true,
-        deviceType: 'ios',
-        deviceId: device.id,
-        manufacturer: 'Apple',
-        model: deviceName.trim() || 'iPhone'
-      });
-    } catch (error) {
-      res.status(500).json({
-        connected: false,
-        error: 'Failed to get iOS device info',
-        message: error.message
-      });
-    }
+  } else if (connectedDevice.type === 'ios') {
+    // Use stored device info - no need to call pymobiledevice3 again!
+    res.json({
+      connected: true,
+      deviceType: 'ios',
+      deviceId: connectedDevice.info.Identifier,
+      manufacturer: 'Apple',
+      model: getFriendlyModelName(connectedDevice.info.ProductType, connectedDevice.info.DeviceName)
+    });
   }
 });
 
 // Get device resolution endpoint
 app.get('/resolution', async (req, res) => {
-  const device = await detectDeviceType();
-
-  if (!device.connected) {
+  if (!connectedDevice.connected) {
     return res.status(400).json({ error: 'No device connected' });
   }
 
   try {
-    if (device.type === 'android') {
+    if (connectedDevice.type === 'android') {
       // Get physical size (always in default/portrait orientation)
       const { stdout: sizeOutput } = await execAsync('adb shell wm size');
       const sizeMatch = sizeOutput.match(/(\d+)x(\d+)/);
@@ -171,29 +259,18 @@ app.get('/resolution', async (req, res) => {
         rotation: rotation,
         isLandscape: isLandscape
       });
-    } else if (device.type === 'ios') {
-      // iOS - take a screenshot and read its dimensions
-      const tempFile = path.join(__dirname, 'temp_resolution_detect.png');
-      await execAsync(`idevicescreenshot -u ${device.id} "${tempFile}"`);
-
-      const sizeOf = require('image-size');
-      const dimensions = sizeOf(tempFile);
-      fs.unlinkSync(tempFile);
-
-      // Estimate scale factor (2x or 3x)
-      // Most modern iPhones are @3x (width > 1100)
-      const scale = dimensions.width > 1100 ? 3 : 2;
-      const logicalWidth = Math.round(dimensions.width / scale);
-      const logicalHeight = Math.round(dimensions.height / scale);
+    } else if (connectedDevice.type === 'ios') {
+      // iOS - look up resolution from stored device specs (no API call needed!)
+      const resolutionInfo = getIOSResolution(connectedDevice.info.ProductType);
 
       res.json({
         success: true,
-        physical: { width: dimensions.width, height: dimensions.height },
-        logical: { width: logicalWidth, height: logicalHeight },
-        density: scale * 160, // Fake density to match Android format
-        scale: scale,
+        physical: resolutionInfo.physical,
+        logical: resolutionInfo.logical,
+        density: resolutionInfo.scale * 160,
+        scale: resolutionInfo.scale,
         rotation: 0,
-        isLandscape: dimensions.width > dimensions.height
+        isLandscape: false
       });
     }
   } catch (error) {
@@ -208,43 +285,71 @@ app.get('/resolution', async (req, res) => {
 // Take screenshot endpoint
 app.get('/screenshot', async (req, res) => {
   const tempFile = path.join(__dirname, 'temp_screenshot.png');
-  const device = await detectDeviceType();
+  let finalFile = tempFile; // Track which file to read (PNG or JPEG)
 
-  if (!device.connected) {
+  if (!connectedDevice.connected) {
     return res.status(400).json({ error: 'No device connected' });
   }
 
   try {
-    if (device.type === 'android') {
+    if (connectedDevice.type === 'android') {
       // Take screenshot and pull it to local machine
       await execAsync('adb shell screencap -p /sdcard/screenshot.png');
       await execAsync(`adb pull /sdcard/screenshot.png "${tempFile}"`);
       await execAsync('adb shell rm /sdcard/screenshot.png');
-    } else if (device.type === 'ios') {
-      // iOS - much simpler!
-      await execAsync(`idevicescreenshot -u ${device.id} "${tempFile}"`);
+    } else if (connectedDevice.type === 'ios') {
+      // Take screenshot using pymobiledevice3 with RSD params
+      try {
+        const cmd = buildPymobiledevice3Command(
+          `pymobiledevice3 developer dvt screenshot "${tempFile}"`
+        );
+        await execAsync(cmd);
+      } catch (error) {
+        // If error mentions tunnel, provide helpful message
+        if (error.message && (error.message.includes('tunneld') || error.message.includes('RemoteXPC'))) {
+          const rsd = getIOSRSDParams();
+          throw new Error(rsd.configured ?
+            'Tunnel not running. Start it with: sudo pymobiledevice3 remote start-tunnel' :
+            rsd.instructions
+          );
+        }
+        throw error;
+      }
     }
 
-    // Read the screenshot file
-    const imageBuffer = fs.readFileSync(tempFile);
+    // Convert PNG to JPEG for better compression (both Android and iOS)
+    const jpegFile = tempFile.replace('.png', '.jpg');
+    await sharp(tempFile)
+      .jpeg({ quality: 85 })
+      .toFile(jpegFile);
+
+    // Delete original PNG, use JPEG instead
+    fs.unlinkSync(tempFile);
+    finalFile = jpegFile;
+
+    // Read the screenshot file and encode
+    const imageBuffer = fs.readFileSync(finalFile);
     const base64Image = imageBuffer.toString('base64');
 
     // Clean up temp file
-    fs.unlinkSync(tempFile);
+    fs.unlinkSync(finalFile);
 
     // Send as JSON with base64 data
     res.json({
       success: true,
       image: base64Image,
-      format: 'png'
+      format: 'jpeg'  // Always JPEG now (both Android and iOS)
     });
 
   } catch (error) {
     console.error('Screenshot error:', error);
 
-    // Clean up temp file if it exists
+    // Clean up temp files if they exist
     if (fs.existsSync(tempFile)) {
       fs.unlinkSync(tempFile);
+    }
+    if (finalFile !== tempFile && fs.existsSync(finalFile)) {
+      fs.unlinkSync(finalFile);
     }
 
     res.status(500).json({
@@ -254,8 +359,82 @@ app.get('/screenshot', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Mobile Screenshot Server running on http://localhost:${PORT}`);
-  console.log(`📱 Connect your Android (via ADB) or iOS (via USB) device`);
-  console.log(`💡 Test connection: http://localhost:${PORT}/health`);
-});
+// Prompt for iOS RSD configuration if needed
+async function promptForIOSConfig() {
+  console.log('🔍 Detecting connected devices...\n');
+  await detectAndStoreDevice();
+
+  if (!connectedDevice.connected) {
+    console.log('❌ No device detected');
+    console.log('   Connect an Android device (via ADB) or iOS device (via USB)\n');
+    return;
+  }
+
+  if (connectedDevice.type === 'android') {
+    // Get Android device details
+    try {
+      const { stdout: manufacturer } = await execAsync('adb shell getprop ro.product.manufacturer');
+      const { stdout: model } = await execAsync('adb shell getprop ro.product.model');
+      console.log(`✓ Detected: ${manufacturer.trim()} ${model.trim()} (Android)`);
+      console.log(`  Device ID: ${connectedDevice.id}\n`);
+    } catch (e) {
+      console.log(`✓ Detected: Android device (ID: ${connectedDevice.id})\n`);
+    }
+    return;
+  }
+
+  if (connectedDevice.type === 'ios') {
+    // iOS device info already in connectedDevice.info
+    const modelName = getFriendlyModelName(
+      connectedDevice.info.ProductType,
+      connectedDevice.info.DeviceName
+    );
+    console.log(`✓ Detected: ${modelName} (iOS ${connectedDevice.info.ProductVersion})`);
+    console.log(`  Device ID: ${connectedDevice.info.Identifier}\n`);
+
+    // Only prompt if RSD not already configured
+    if (!iosRSDConfig.address) {
+      console.log('\n📱 iOS tunnel configuration required.');
+      console.log('   Start tunnel in another terminal: sudo pymobiledevice3 remote start-tunnel');
+      console.log('   Then enter the RSD connection info below:\n');
+
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+      });
+
+      return new Promise((resolve) => {
+        rl.question('RSD Address: ', (address) => {
+          rl.question('RSD Port: ', (port) => {
+            iosRSDConfig.address = address.trim();
+            iosRSDConfig.port = port.trim();
+            rl.close();
+            console.log('');
+            resolve();
+          });
+        });
+      });
+    } else {
+      console.log(`✓ iOS tunnel already configured: ${iosRSDConfig.address}:${iosRSDConfig.port}\n`);
+    }
+  }
+}
+
+// Start server
+async function startServer() {
+  await promptForIOSConfig();
+
+  app.listen(PORT, () => {
+    console.log(`🚀 Mobile Screenshot Server running on http://localhost:${PORT}`);
+    console.log(`📱 Connect your Android (via ADB) or iOS (via USB) device`);
+    console.log(`💡 Test connection: http://localhost:${PORT}/health`);
+
+    // Check iOS tunnel configuration
+    const rsd = getIOSRSDParams();
+    if (rsd.configured) {
+      console.log(`✓ iOS tunnel configured: ${rsd.address}:${rsd.port}`);
+    }
+  });
+}
+
+startServer();
