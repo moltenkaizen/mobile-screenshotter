@@ -293,10 +293,8 @@ app.get('/screenshot', async (req, res) => {
 
   try {
     if (connectedDevice.type === 'android') {
-      // Take screenshot and pull it to local machine
-      await execAsync('adb shell screencap -p /sdcard/screenshot.png');
-      await execAsync(`adb pull /sdcard/screenshot.png "${tempFile}"`);
-      await execAsync('adb shell rm /sdcard/screenshot.png');
+      // Stream screenshot directly from device (faster than file-based approach)
+      await execAsync(`adb exec-out screencap -p > "${tempFile}"`, { maxBuffer: 50 * 1024 * 1024 });
     } else if (connectedDevice.type === 'ios') {
       // Take screenshot using pymobiledevice3 with RSD params
       try {

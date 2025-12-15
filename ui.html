@@ -232,6 +232,36 @@
       errorEl.style.display = 'block';
     }
 
+    // Animated progress indicator
+    let progressInterval = null;
+    function startProgress(btn) {
+      const stages = ['Capturing', 'Processing', 'Transferring'];
+      let stageIndex = 0;
+      let dots = 0;
+
+      const update = () => {
+        dots = (dots + 1) % 4;
+        btn.textContent = stages[stageIndex] + '.'.repeat(dots || 1);
+      };
+
+      update();
+      progressInterval = setInterval(() => {
+        dots++;
+        if (dots > 3) {
+          dots = 1;
+          stageIndex = Math.min(stageIndex + 1, stages.length - 1);
+        }
+        btn.textContent = stages[stageIndex] + '.'.repeat(dots);
+      }, 400);
+    }
+
+    function stopProgress() {
+      if (progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = null;
+      }
+    }
+
     // Take screenshot
     async function takeScreenshot() {
       const screenshotBtn = document.getElementById('screenshot');
@@ -239,7 +269,7 @@
 
       errorEl.style.display = 'none';
       screenshotBtn.disabled = true;
-      screenshotBtn.textContent = 'Taking screenshot...';
+      startProgress(screenshotBtn);
 
       try {
         // Take screenshot (resolution is included in response)
@@ -277,15 +307,17 @@
             }
           }, '*');
 
-          screenshotBtn.textContent = '✓ Screenshot captured!';
+          stopProgress();
+          screenshotBtn.textContent = '✓ Done!';
           setTimeout(() => {
             screenshotBtn.textContent = 'Take Screenshot';
             screenshotBtn.disabled = false;
-          }, 1500);
+          }, 1000);
         } else {
           throw new Error(data.error || 'Unknown error');
         }
       } catch (error) {
+        stopProgress();
         showError('Failed to take screenshot: ' + error.message);
         screenshotBtn.textContent = 'Take Screenshot';
         screenshotBtn.disabled = false;
