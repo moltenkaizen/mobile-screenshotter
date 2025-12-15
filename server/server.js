@@ -10,6 +10,7 @@ const sharp = require('sharp');
 const execAsync = promisify(exec);
 const app = express();
 const PORT = 3000;
+const BASE_DENSITY = 160; // Android baseline density (mdpi)
 
 // Store RSD params in memory (set via env vars or interactive prompt)
 let iosRSDConfig = {
@@ -62,6 +63,56 @@ function getIOSResolution(productType) {
     physical: { width: specs.width, height: specs.height },
     logical: { width: Math.round(specs.width / specs.scale), height: Math.round(specs.height / specs.scale) },
     scale: specs.scale
+  };
+}
+
+// Get Android resolution (extracted to avoid duplication)
+async function getAndroidResolution() {
+  // Get physical size (always in default/portrait orientation)
+  const { stdout: sizeOutput } = await execAsync('adb shell wm size');
+  const sizeMatch = sizeOutput.match(/(\d+)x(\d+)/);
+  if (!sizeMatch) throw new Error('Could not parse screen size');
+  let physicalWidth = parseInt(sizeMatch[1]);
+  let physicalHeight = parseInt(sizeMatch[2]);
+
+  // Get density
+  const { stdout: densityOutput } = await execAsync('adb shell wm density');
+  const densityMatch = densityOutput.match(/density:\s*(\d+)/);
+  if (!densityMatch) throw new Error('Could not parse screen density');
+  const density = parseInt(densityMatch[1]);
+
+  // Get current rotation (0=portrait, 1=landscape-left, 2=upside-down, 3=landscape-right)
+  let rotation = 0;
+  try {
+    const { stdout: rotationOutput } = await execAsync('adb shell dumpsys window | grep mCurrentRotation');
+    const rotationMatch = rotationOutput.match(/ROTATION_(\d+)/);
+    if (rotationMatch) {
+      rotation = parseInt(rotationMatch[1]) / 90;
+    }
+  } catch (e) {
+    // If rotation fetch fails, assume portrait (0)
+    rotation = 0;
+  }
+
+  // If device is in landscape (rotation 1 or 3), swap width and height
+  const isLandscape = (rotation === 1 || rotation === 3);
+  if (isLandscape) {
+    [physicalWidth, physicalHeight] = [physicalHeight, physicalWidth];
+  }
+
+  // Calculate logical resolution
+  const scale = density / BASE_DENSITY;
+  const logicalWidth = Math.round(physicalWidth / scale);
+  const logicalHeight = Math.round(physicalHeight / scale);
+
+  return {
+    success: true,
+    physical: { width: physicalWidth, height: physicalHeight },
+    logical: { width: logicalWidth, height: logicalHeight },
+    density: density,
+    scale: scale,
+    rotation: rotation,
+    isLandscape: isLandscape
   };
 }
 
@@ -199,6 +250,8 @@ app.get('/device', async (req, res) => {
       manufacturer: 'Apple',
       model: getFriendlyModelName(connectedDevice.info.ProductType, connectedDevice.info.DeviceName)
     });
+  } else {
+    res.status(400).json({ connected: false, error: 'Unknown device type' });
   }
 });
 
@@ -210,68 +263,21 @@ app.get('/resolution', async (req, res) => {
 
   try {
     if (connectedDevice.type === 'android') {
-      // Get physical size (always in default/portrait orientation)
-      const { stdout: sizeOutput } = await execAsync('adb shell wm size');
-      const sizeMatch = sizeOutput.match(/(\d+)x(\d+)/);
-      if (!sizeMatch) throw new Error('Could not parse screen size');
-      let physicalWidth = parseInt(sizeMatch[1]);
-      let physicalHeight = parseInt(sizeMatch[2]);
-
-      // Get density
-      const { stdout: densityOutput } = await execAsync('adb shell wm density');
-      const densityMatch = densityOutput.match(/density:\s*(\d+)/);
-      if (!densityMatch) throw new Error('Could not parse screen density');
-      const density = parseInt(densityMatch[1]);
-
-      // Get current rotation (0=portrait, 1=landscape-left, 2=upside-down, 3=landscape-right)
-      let rotation = 0;
-      try {
-        const { stdout: rotationOutput } = await execAsync('adb shell dumpsys window | grep mCurrentRotation');
-        // Output looks like: "mCurrentRotation=ROTATION_90" or just "ROTATION_90"
-        const rotationMatch = rotationOutput.match(/ROTATION_(\d+)/);
-        if (rotationMatch) {
-          const rotationDegrees = parseInt(rotationMatch[1]);
-          // Convert degrees to rotation number: 0=0°, 90=1, 180=2, 270=3
-          rotation = rotationDegrees / 90;
-        }
-      } catch (e) {
-        // If rotation fetch fails, assume portrait (0)
-        rotation = 0;
-      }
-
-      // If device is in landscape (rotation 1 or 3), swap width and height
-      const isLandscape = (rotation === 1 || rotation === 3);
-      if (isLandscape) {
-        [physicalWidth, physicalHeight] = [physicalHeight, physicalWidth];
-      }
-
-      // Calculate logical resolution
-      const scale = density / 160;
-      const logicalWidth = Math.round(physicalWidth / scale);
-      const logicalHeight = Math.round(physicalHeight / scale);
-
-      res.json({
-        success: true,
-        physical: { width: physicalWidth, height: physicalHeight },
-        logical: { width: logicalWidth, height: logicalHeight },
-        density: density,
-        scale: scale,
-        rotation: rotation,
-        isLandscape: isLandscape
-      });
+      const resolutionData = await getAndroidResolution();
+      res.json(resolutionData);
     } else if (connectedDevice.type === 'ios') {
-      // iOS - look up resolution from stored device specs (no API call needed!)
       const resolutionInfo = getIOSResolution(connectedDevice.info.ProductType);
-
       res.json({
         success: true,
         physical: resolutionInfo.physical,
         logical: resolutionInfo.logical,
-        density: resolutionInfo.scale * 160,
+        density: resolutionInfo.scale * BASE_DENSITY,
         scale: resolutionInfo.scale,
         rotation: 0,
         isLandscape: false
       });
+    } else {
+      res.status(400).json({ error: 'Unknown device type' });
     }
   } catch (error) {
     console.error('Resolution error:', error);
@@ -341,7 +347,7 @@ app.get('/screenshot', async (req, res) => {
         success: true,
         physical: resInfo.physical,
         logical: resInfo.logical,
-        density: resInfo.scale * 160,
+        density: resInfo.scale * BASE_DENSITY,
         scale: resInfo.scale,
         rotation: 0,
         isLandscape: false
@@ -349,42 +355,7 @@ app.get('/screenshot', async (req, res) => {
     } else if (connectedDevice.type === 'android') {
       // Android: Fetch current resolution (rotation may have changed)
       try {
-        const { stdout: sizeOutput } = await execAsync('adb shell wm size');
-        const sizeMatch = sizeOutput.match(/(\d+)x(\d+)/);
-        const { stdout: densityOutput } = await execAsync('adb shell wm density');
-        const densityMatch = densityOutput.match(/density:\s*(\d+)/);
-
-        if (sizeMatch && densityMatch) {
-          let physicalWidth = parseInt(sizeMatch[1]);
-          let physicalHeight = parseInt(sizeMatch[2]);
-          const density = parseInt(densityMatch[1]);
-
-          // Check rotation
-          let rotation = 0;
-          try {
-            const { stdout: rotationOutput } = await execAsync('adb shell dumpsys window | grep mCurrentRotation');
-            const rotationMatch = rotationOutput.match(/ROTATION_(\d+)/);
-            if (rotationMatch) {
-              rotation = parseInt(rotationMatch[1]) / 90;
-            }
-          } catch (e) { /* ignore */ }
-
-          const isLandscape = (rotation === 1 || rotation === 3);
-          if (isLandscape) {
-            [physicalWidth, physicalHeight] = [physicalHeight, physicalWidth];
-          }
-
-          const scale = density / 160;
-          resolutionData = {
-            success: true,
-            physical: { width: physicalWidth, height: physicalHeight },
-            logical: { width: Math.round(physicalWidth / scale), height: Math.round(physicalHeight / scale) },
-            density: density,
-            scale: scale,
-            rotation: rotation,
-            isLandscape: isLandscape
-          };
-        }
+        resolutionData = await getAndroidResolution();
       } catch (e) { /* resolution fetch failed, client can fallback */ }
     }
 

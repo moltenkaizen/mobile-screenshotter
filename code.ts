@@ -1,4 +1,4 @@
-// This plugin captures screenshots from mobile devices (Android via ADB, iOS via libimobiledevice)
+// This plugin captures screenshots from mobile devices (Android via ADB, iOS via pymobiledevice3)
 // and places them into the current Figma file
 
 interface ResolutionData {
@@ -48,8 +48,6 @@ figma.ui.onmessage = async (msg: {
       // Always create frame, use logical or physical size based on toggle
       await createFramedScreenshot(
         imageHash,
-        physicalWidth,
-        physicalHeight,
         msg.resolutionData,
         msg.useLogicalSize ?? true
       );
@@ -65,8 +63,6 @@ figma.ui.onmessage = async (msg: {
 
 async function createFramedScreenshot(
   imageHash: string,
-  _physicalWidth: number,
-  _physicalHeight: number,
   resolutionData: ResolutionData,
   useLogicalSize: boolean
 ): Promise<void> {

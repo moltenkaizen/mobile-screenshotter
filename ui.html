@@ -146,7 +146,24 @@
 
   <script>
     const SERVER_URL = 'http://localhost:3000';
-    let isConnected = false;
+    const FETCH_TIMEOUT = 10000; // 10 second timeout for fetch requests
+
+    // Fetch with timeout wrapper
+    async function fetchWithTimeout(url, options = {}) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+      try {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(timeoutId);
+        return response;
+      } catch (error) {
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+          throw new Error('Request timed out');
+        }
+        throw error;
+      }
+    }
 
     // Toggle switch functionality
     let importResolution = 'logical'; // Default to logical
@@ -176,11 +193,11 @@
 
       try {
         // Check server
-        const healthRes = await fetch(`${SERVER_URL}/health`);
+        const healthRes = await fetchWithTimeout(`${SERVER_URL}/health`);
         if (!healthRes.ok) throw new Error('Server not responding');
 
         // Check device
-        const deviceRes = await fetch(`${SERVER_URL}/device`);
+        const deviceRes = await fetchWithTimeout(`${SERVER_URL}/device`);
         const deviceData = await deviceRes.json();
 
         if (deviceData.connected) {
@@ -193,11 +210,10 @@
           deviceModelEl.textContent = deviceName;
 
           screenshotBtn.disabled = false;
-          isConnected = true;
 
           // Fetch and display resolution info
           try {
-            const resRes = await fetch(`${SERVER_URL}/resolution`);
+            const resRes = await fetchWithTimeout(`${SERVER_URL}/resolution`);
             const resData = await resRes.json();
             if (resData.success) {
               resolutionInfoEl.style.display = 'block';
@@ -213,15 +229,13 @@
           statusEl.textContent = '✗ Server running, no device connected';
           deviceInfoEl.style.display = 'none';
           screenshotBtn.disabled = true;
-          isConnected = false;
-          showError('Please connect your Android device via USB and enable USB debugging');
+          showError('Connect your device via USB (Android: enable USB debugging, iOS: trust computer)');
         }
       } catch (error) {
         statusEl.className = 'status disconnected';
         statusEl.textContent = '✗ Server not running';
         deviceInfoEl.style.display = 'none';
         screenshotBtn.disabled = true;
-        isConnected = false;
         showError('Start the server: cd server && npm install && npm start');
       }
     }
@@ -273,14 +287,14 @@
 
       try {
         // Take screenshot (resolution is included in response)
-        const response = await fetch(`${SERVER_URL}/screenshot`);
+        const response = await fetchWithTimeout(`${SERVER_URL}/screenshot`);
         const data = await response.json();
 
         if (data.success) {
           // Use resolution from screenshot response (or fallback to separate fetch)
           let resolutionData = data.resolution;
           if (!resolutionData || !resolutionData.success) {
-            const resResponse = await fetch(`${SERVER_URL}/resolution`);
+            const resResponse = await fetchWithTimeout(`${SERVER_URL}/resolution`);
             resolutionData = await resResponse.json();
             if (!resolutionData.success) {
               throw new Error(resolutionData.error || 'Failed to get resolution');
