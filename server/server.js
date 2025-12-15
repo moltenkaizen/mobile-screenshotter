@@ -334,11 +334,68 @@ app.get('/screenshot', async (req, res) => {
     // Clean up temp file
     fs.unlinkSync(finalFile);
 
-    // Send as JSON with base64 data
+    // Get resolution data to include in response (saves separate fetch)
+    let resolutionData = null;
+    if (connectedDevice.type === 'ios') {
+      // iOS: Use cached device specs (instant)
+      const resInfo = getIOSResolution(connectedDevice.info.ProductType);
+      resolutionData = {
+        success: true,
+        physical: resInfo.physical,
+        logical: resInfo.logical,
+        density: resInfo.scale * 160,
+        scale: resInfo.scale,
+        rotation: 0,
+        isLandscape: false
+      };
+    } else if (connectedDevice.type === 'android') {
+      // Android: Fetch current resolution (rotation may have changed)
+      try {
+        const { stdout: sizeOutput } = await execAsync('adb shell wm size');
+        const sizeMatch = sizeOutput.match(/(\d+)x(\d+)/);
+        const { stdout: densityOutput } = await execAsync('adb shell wm density');
+        const densityMatch = densityOutput.match(/density:\s*(\d+)/);
+
+        if (sizeMatch && densityMatch) {
+          let physicalWidth = parseInt(sizeMatch[1]);
+          let physicalHeight = parseInt(sizeMatch[2]);
+          const density = parseInt(densityMatch[1]);
+
+          // Check rotation
+          let rotation = 0;
+          try {
+            const { stdout: rotationOutput } = await execAsync('adb shell dumpsys window | grep mCurrentRotation');
+            const rotationMatch = rotationOutput.match(/ROTATION_(\d+)/);
+            if (rotationMatch) {
+              rotation = parseInt(rotationMatch[1]) / 90;
+            }
+          } catch (e) { /* ignore */ }
+
+          const isLandscape = (rotation === 1 || rotation === 3);
+          if (isLandscape) {
+            [physicalWidth, physicalHeight] = [physicalHeight, physicalWidth];
+          }
+
+          const scale = density / 160;
+          resolutionData = {
+            success: true,
+            physical: { width: physicalWidth, height: physicalHeight },
+            logical: { width: Math.round(physicalWidth / scale), height: Math.round(physicalHeight / scale) },
+            density: density,
+            scale: scale,
+            rotation: rotation,
+            isLandscape: isLandscape
+          };
+        }
+      } catch (e) { /* resolution fetch failed, client can fallback */ }
+    }
+
+    // Send as JSON with base64 data and resolution
     res.json({
       success: true,
       image: base64Image,
-      format: 'jpeg'  // Always JPEG now (both Android and iOS)
+      format: 'jpeg',
+      resolution: resolutionData  // Include resolution to skip separate fetch
     });
 
   } catch (error) {

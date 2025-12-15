@@ -95,15 +95,30 @@ async function createFramedScreenshot(
   // Add image to frame
   frame.appendChild(imageRect);
 
-  // Position frame in viewport
+  // Position frame in viewport center
   const viewport = figma.viewport.center;
   frame.x = viewport.x - frameWidth / 2;
   frame.y = viewport.y - frameHeight / 2;
 
-  // Add to page, select, and zoom
-  figma.currentPage.appendChild(frame);
+  // Find the best parent container (Section or page)
+  let parentContainer: BaseNode & ChildrenMixin = figma.currentPage;
+
+  // Check if viewport center is inside any Section
+  const sections = figma.currentPage.findAll(node => node.type === 'SECTION') as SectionNode[];
+  for (const section of sections) {
+    // Check if the frame's center point is within this section's bounds
+    if (viewport.x >= section.x &&
+        viewport.x <= section.x + section.width &&
+        viewport.y >= section.y &&
+        viewport.y <= section.y + section.height) {
+      parentContainer = section;
+      break;
+    }
+  }
+
+  // Add to parent container and select
+  parentContainer.appendChild(frame);
   figma.currentPage.selection = [frame];
-  figma.viewport.scrollAndZoomIntoView([frame]);
 
   figma.notify('Screenshot added to canvas!');
 }

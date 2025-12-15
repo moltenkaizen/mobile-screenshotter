@@ -242,19 +242,21 @@
       screenshotBtn.textContent = 'Taking screenshot...';
 
       try {
-        // Always fetch resolution data
-        const resResponse = await fetch(`${SERVER_URL}/resolution`);
-        const resolutionData = await resResponse.json();
-
-        if (!resolutionData.success) {
-          throw new Error(resolutionData.error || 'Failed to get resolution');
-        }
-
-        // Take screenshot
+        // Take screenshot (resolution is included in response)
         const response = await fetch(`${SERVER_URL}/screenshot`);
         const data = await response.json();
 
         if (data.success) {
+          // Use resolution from screenshot response (or fallback to separate fetch)
+          let resolutionData = data.resolution;
+          if (!resolutionData || !resolutionData.success) {
+            const resResponse = await fetch(`${SERVER_URL}/resolution`);
+            resolutionData = await resResponse.json();
+            if (!resolutionData.success) {
+              throw new Error(resolutionData.error || 'Failed to get resolution');
+            }
+          }
+
           // Decode base64 to Uint8Array in the UI (where atob is available)
           const binaryString = atob(data.image);
           const bytes = new Uint8Array(binaryString.length);
