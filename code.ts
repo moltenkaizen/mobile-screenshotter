@@ -76,7 +76,6 @@ async function createFramedScreenshot(
 
   // Resize frame
   frame.resize(frameWidth, frameHeight);
-  frame.constrainProportions = true;
 
   // Create image rectangle
   const imageRect = figma.createRectangle();
