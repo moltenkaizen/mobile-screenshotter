@@ -121,12 +121,8 @@ async function createFramedScreenshot(
   frame.appendChild(imageRect);
   console.log(`[FRAME] appendChild to frame: ${Date.now() - start}ms`);
 
-  // Position frame in viewport center
-  const viewport = figma.viewport.center;
-  frame.x = viewport.x - frameWidth / 2;
-  frame.y = viewport.y - frameHeight / 2;
-
   // Find the best parent container (Section or page)
+  const viewport = figma.viewport.center;
   let parentContainer: BaseNode & ChildrenMixin = figma.currentPage;
 
   // Check if viewport center is inside any Section (sections are always top-level)
@@ -135,7 +131,6 @@ async function createFramedScreenshot(
   console.log(`[FRAME] filter sections: ${Date.now() - start}ms (found ${sections.length})`);
 
   for (const section of sections) {
-    // Check if the frame's center point is within this section's bounds
     if (viewport.x >= section.x &&
         viewport.x <= section.x + section.width &&
         viewport.y >= section.y &&
@@ -143,6 +138,15 @@ async function createFramedScreenshot(
       parentContainer = section;
       break;
     }
+  }
+
+  // Position frame in viewport center (adjust for Section-relative coordinates if needed)
+  if (parentContainer.type === 'SECTION') {
+    frame.x = viewport.x - parentContainer.x - frameWidth / 2;
+    frame.y = viewport.y - parentContainer.y - frameHeight / 2;
+  } else {
+    frame.x = viewport.x - frameWidth / 2;
+    frame.y = viewport.y - frameHeight / 2;
   }
 
   // Add to parent container and select
