@@ -117,7 +117,9 @@ async function getAndroidResolution() {
 }
 
 // Enable CORS for Figma plugin
-app.use(cors());
+app.use(cors({
+  exposedHeaders: ['X-Resolution']
+}));
 app.use(express.json());
 
 // Device type detection function (runs once at startup)
@@ -321,24 +323,24 @@ app.get('/screenshot', async (req, res) => {
       }
     }
 
-    // Convert PNG to JPEG for better compression (both Android and iOS)
-    const jpegFile = tempFile.replace('.png', '.jpg');
-    await sharp(tempFile)
-      .jpeg({ quality: 85 })
-      .toFile(jpegFile);
+    // Image format conversion (comment/uncomment to switch)
+    // --- JPEG (smaller, faster transfer, some artifacts) ---
+    // const jpegFile = tempFile.replace('.png', '.jpg');
+    // await sharp(tempFile)
+    //   .jpeg({ quality: 95 })
+    //   .toFile(jpegFile);
+    // fs.unlinkSync(tempFile);
+    // finalFile = jpegFile;
+    // --- PNG (lossless, larger files) ---
+    // No conversion needed, already PNG
 
-    // Delete original PNG, use JPEG instead
-    fs.unlinkSync(tempFile);
-    finalFile = jpegFile;
-
-    // Read the screenshot file and encode
+    // Read the screenshot file
     const imageBuffer = fs.readFileSync(finalFile);
-    const base64Image = imageBuffer.toString('base64');
 
     // Clean up temp file
     fs.unlinkSync(finalFile);
 
-    // Get resolution data to include in response (saves separate fetch)
+    // Get resolution data to include in headers (saves separate fetch)
     let resolutionData = null;
     if (connectedDevice.type === 'ios') {
       // iOS: Use cached device specs (instant)
@@ -359,13 +361,12 @@ app.get('/screenshot', async (req, res) => {
       } catch (e) { /* resolution fetch failed, client can fallback */ }
     }
 
-    // Send as JSON with base64 data and resolution
-    res.json({
-      success: true,
-      image: base64Image,
-      format: 'jpeg',
-      resolution: resolutionData  // Include resolution to skip separate fetch
-    });
+    // Send resolution as JSON header, image as raw binary
+    res.set('Content-Type', 'image/png');
+    if (resolutionData) {
+      res.set('X-Resolution', JSON.stringify(resolutionData));
+    }
+    res.send(imageBuffer);
 
   } catch (error) {
     console.error('Screenshot error:', error);

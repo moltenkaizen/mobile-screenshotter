@@ -286,50 +286,47 @@
       startProgress(screenshotBtn);
 
       try {
-        // Take screenshot (resolution is included in response)
+        // Take screenshot (resolution is included in headers)
         const response = await fetchWithTimeout(`${SERVER_URL}/screenshot`);
-        const data = await response.json();
 
-        if (data.success) {
-          // Use resolution from screenshot response (or fallback to separate fetch)
-          let resolutionData = data.resolution;
-          if (!resolutionData || !resolutionData.success) {
-            const resResponse = await fetchWithTimeout(`${SERVER_URL}/resolution`);
-            resolutionData = await resResponse.json();
-            if (!resolutionData.success) {
-              throw new Error(resolutionData.error || 'Failed to get resolution');
-            }
-          }
-
-          // Decode base64 to Uint8Array in the UI (where atob is available)
-          const binaryString = atob(data.image);
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-          }
-
-          // Determine sizing based on toggle
-          const useLogicalSize = (importResolution === 'logical');
-
-          // Send image data to plugin main thread
-          parent.postMessage({
-            pluginMessage: {
-              type: 'create-screenshot',
-              imageData: Array.from(bytes), // Convert to regular array for postMessage
-              useLogicalSize: useLogicalSize,
-              resolutionData: resolutionData
-            }
-          }, '*');
-
-          stopProgress();
-          screenshotBtn.textContent = '✓ Done!';
-          setTimeout(() => {
-            screenshotBtn.textContent = 'Take Screenshot';
-            screenshotBtn.disabled = false;
-          }, 1000);
-        } else {
-          throw new Error(data.error || 'Unknown error');
+        if (!response.ok) {
+          throw new Error('Screenshot request failed');
         }
+
+        // Get resolution from header (or fallback to separate fetch)
+        const resolutionHeader = response.headers.get('X-Resolution');
+        let resolutionData = resolutionHeader ? JSON.parse(resolutionHeader) : null;
+        if (!resolutionData || !resolutionData.success) {
+          const resResponse = await fetchWithTimeout(`${SERVER_URL}/resolution`);
+          resolutionData = await resResponse.json();
+          if (!resolutionData.success) {
+            throw new Error(resolutionData.error || 'Failed to get resolution');
+          }
+        }
+
+        // Get raw binary directly (no base64 decode needed)
+        const arrayBuffer = await response.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuffer);
+
+        // Determine sizing based on toggle
+        const useLogicalSize = (importResolution === 'logical');
+
+        // Send image data to plugin main thread
+        parent.postMessage({
+          pluginMessage: {
+            type: 'create-screenshot',
+            imageData: Array.from(bytes), // Convert to regular array for postMessage
+            useLogicalSize: useLogicalSize,
+            resolutionData: resolutionData
+          }
+        }, '*');
+
+        stopProgress();
+        screenshotBtn.textContent = '✓ Done!';
+        setTimeout(() => {
+          screenshotBtn.textContent = 'Take Screenshot';
+          screenshotBtn.disabled = false;
+        }, 1000);
       } catch (error) {
         stopProgress();
         showError('Failed to take screenshot: ' + error.message);
