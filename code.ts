@@ -17,11 +17,15 @@ figma.ui.onmessage = async (msg: {
   imageData?: number[];
   useLogicalSize?: boolean;
   resolutionData?: ResolutionData;
+  startTime?: number;  // Button click timestamp from UI
 }) => {
   if (msg.type === 'create-screenshot') {
     try {
       const totalStart = Date.now();
       console.log('[FIGMA] ========== Processing screenshot ==========');
+      if (msg.startTime) {
+        console.log(`[FIGMA] Time since button click: ${totalStart - msg.startTime}ms`);
+      }
 
       if (!msg.imageData || !msg.resolutionData) {
         figma.notify('Error: Missing screenshot data', { error: true });
@@ -52,7 +56,10 @@ figma.ui.onmessage = async (msg: {
         msg.useLogicalSize ?? true
       );
       console.log(`[FIGMA] createFramedScreenshot: ${Date.now() - start}ms`);
-      console.log(`[FIGMA] ========== TOTAL: ${Date.now() - totalStart}ms ==========`);
+      console.log(`[FIGMA] ========== Figma processing: ${Date.now() - totalStart}ms ==========`);
+      if (msg.startTime) {
+        console.log(`[FIGMA] ========== END-TO-END: ${Date.now() - msg.startTime}ms ==========`);
+      }
     } catch (error: unknown) {
       console.error('Error creating screenshot:', error);
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';

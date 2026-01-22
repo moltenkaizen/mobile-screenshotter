@@ -286,8 +286,13 @@
       startProgress(screenshotBtn);
 
       try {
+        const startTime = Date.now();
+        console.log('[UI] ========== Taking screenshot ==========');
+
         // Take screenshot (resolution is included in headers)
+        let fetchStart = Date.now();
         const response = await fetchWithTimeout(`${SERVER_URL}/screenshot`);
+        console.log(`[UI] Network fetch: ${Date.now() - fetchStart}ms`);
 
         if (!response.ok) {
           throw new Error('Screenshot request failed');
@@ -305,19 +310,23 @@
         }
 
         // Get raw binary directly (no base64 decode needed)
+        let processStart = Date.now();
         const arrayBuffer = await response.arrayBuffer();
         const bytes = new Uint8Array(arrayBuffer);
+        console.log(`[UI] ArrayBuffer processing: ${Date.now() - processStart}ms (${(bytes.length / 1024).toFixed(0)} KB)`);
 
         // Determine sizing based on toggle
         const useLogicalSize = (importResolution === 'logical');
 
         // Send image data to plugin main thread
+        console.log(`[UI] Sending to Figma plugin (elapsed: ${Date.now() - startTime}ms)`);
         parent.postMessage({
           pluginMessage: {
             type: 'create-screenshot',
             imageData: Array.from(bytes), // Convert to regular array for postMessage
             useLogicalSize: useLogicalSize,
-            resolutionData: resolutionData
+            resolutionData: resolutionData,
+            startTime: startTime  // Pass start time for end-to-end measurement
           }
         }, '*');
 
