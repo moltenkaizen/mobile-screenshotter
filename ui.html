@@ -334,10 +334,10 @@
         parent.postMessage({
           pluginMessage: {
             type: 'create-screenshot',
-            imageData: Array.from(bytes), // Convert to regular array for postMessage
+            imageData: bytes,
             useLogicalSize: useLogicalSize,
             resolutionData: resolutionData,
-            startTime: startTime  // Pass start time for end-to-end measurement
+            startTime: startTime
           }
         }, '*');
 

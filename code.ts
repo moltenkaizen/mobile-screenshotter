@@ -18,7 +18,7 @@ figma.showUI(__html__, { width: 280, height: 295 });
 // Handle messages from the UI
 figma.ui.onmessage = async (msg: {
   type: string;
-  imageData?: number[];
+  imageData?: Uint8Array;
   useLogicalSize?: boolean;
   resolutionData?: ResolutionData;
   startTime?: number;  // Button click timestamp from UI
@@ -37,23 +37,12 @@ figma.ui.onmessage = async (msg: {
       }
 
       let start = Date.now();
-      const bytes = new Uint8Array(msg.imageData);
-      if (DEBUG) console.log(`[FIGMA] Uint8Array conversion: ${Date.now() - start}ms (${(bytes.length / 1024).toFixed(0)} KB)`);
+      const image = figma.createImage(msg.imageData);
+      if (DEBUG) console.log(`[FIGMA] createImage: ${Date.now() - start}ms (${(msg.imageData.length / 1024).toFixed(0)} KB)`);
 
-      start = Date.now();
-      const image = figma.createImage(bytes);
-      if (DEBUG) console.log(`[FIGMA] createImage: ${Date.now() - start}ms`);
-
-      start = Date.now();
       const imageHash = image.hash;
-      if (DEBUG) console.log(`[FIGMA] get hash: ${Date.now() - start}ms`);
 
       start = Date.now();
-      const { width: physicalWidth, height: physicalHeight } = await image.getSizeAsync();
-      if (DEBUG) console.log(`[FIGMA] getSizeAsync: ${Date.now() - start}ms (${physicalWidth}x${physicalHeight})`);
-
-      start = Date.now();
-      // Always create frame, use logical or physical size based on toggle
       await createFramedScreenshot(
         imageHash,
         msg.resolutionData,
