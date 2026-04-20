@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const { promisify } = require('util');
 const fs = require('fs');
 const path = require('path');
@@ -12,11 +12,26 @@ const app = express();
 const PORT = 3000;
 const BASE_DENSITY = 160; // Android baseline density (mdpi)
 
-// Store RSD params in memory (set via env vars or interactive prompt)
+// Store RSD params in memory (set via env vars, --rsd flag, or interactive prompt)
 let iosRSDConfig = {
   address: process.env.IOS_RSD_ADDRESS || null,
   port: process.env.IOS_RSD_PORT || null
 };
+
+// Handle to the auto-spawned tunnel child process (iOS only)
+let tunnelProcess = null;
+
+// Parse --rsd "address port" from CLI args (e.g. npm start -- --rsd "fd17:e13c:9ab0::1 56673")
+(function parseArgv() {
+  const rsdIdx = process.argv.indexOf('--rsd');
+  if (rsdIdx !== -1 && process.argv[rsdIdx + 1]) {
+    const parts = process.argv[rsdIdx + 1].trim().split(/\s+/);
+    if (parts.length >= 2) {
+      iosRSDConfig.address = parts[0];
+      iosRSDConfig.port = parts[1];
+    }
+  }
+})();
 
 // Store detected device info (set once at startup)
 let connectedDevice = {
@@ -386,6 +401,88 @@ app.get('/screenshot', async (req, res) => {
   }
 });
 
+// Attempt to auto-spawn the iOS tunnel. Resolves with { address, port } on success, rejects otherwise.
+function startTunnel() {
+  return new Promise((resolve, reject) => {
+    console.log('🔌 Starting iOS tunnel automatically...');
+    console.log('   (you may be prompted for your sudo password)\n');
+
+    const child = spawn(
+      'sudo',
+      ['pymobiledevice3', 'remote', 'start-tunnel'],
+      { stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+
+    tunnelProcess = child;
+
+    let stderrBuf = '';
+    let resolved = false;
+
+    const done = (address, port) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      resolve({ address, port });
+    };
+
+    const fail = (err) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      try { child.kill(); } catch (_) {}
+      tunnelProcess = null;
+      reject(err);
+    };
+
+    // Give the user time to type their sudo password and for the tunnel to initialise
+    const timer = setTimeout(() => fail(new Error('Timed out waiting for tunnel (60s)')), 60000);
+
+    function tryParse(buf) {
+      for (const line of buf.split('\n')) {
+        const t = line.trim();
+        if (!t) continue;
+
+        // "--rsd fd17:e13c:9ab0::1 56673" (confirmed real output format)
+        const rsdMatch = t.match(/--rsd\s+([\S]+)\s+(\d+)/);
+        if (rsdMatch) return done(rsdMatch[1], rsdMatch[2]);
+      }
+
+      // Multi-line fallback: "RSD Address:" followed by "RSD Port:"
+      const addrMatch = buf.match(/RSD Address:\s*([\S]+)/i);
+      const portMatch = buf.match(/RSD Port:\s*(\d+)/i);
+      if (addrMatch && portMatch) return done(addrMatch[1], portMatch[1]);
+    }
+
+    child.stdout.on('data', () => {}); // drain stdout (unused without --script-mode)
+
+    child.stderr.on('data', (chunk) => {
+      stderrBuf += chunk.toString(); // buffer silently; only shown on failure
+      tryParse(stderrBuf);
+    });
+
+    child.on('error', (err) => fail(new Error(`Failed to spawn tunnel: ${err.message}`)));
+
+    child.on('close', (code) => {
+      if (!resolved) {
+        if (stderrBuf) process.stderr.write(stderrBuf); // show suppressed output on failure
+        fail(new Error(`Tunnel process exited early (code ${code})`));
+      }
+    });
+  });
+}
+
+// Clean up tunnel child process on server exit
+function cleanupTunnel() {
+  if (tunnelProcess) {
+    console.log('\n🔌 Stopping tunnel...');
+    tunnelProcess.kill('SIGTERM');
+    tunnelProcess = null;
+  }
+}
+
+process.on('SIGINT',  () => { cleanupTunnel(); process.exit(0); });
+process.on('SIGTERM', () => { cleanupTunnel(); process.exit(0); });
+
 // Prompt for iOS RSD configuration if needed
 async function promptForIOSConfig() {
   console.log('🔍 Detecting connected devices...\n');
@@ -419,31 +516,52 @@ async function promptForIOSConfig() {
     console.log(`✓ Detected: ${modelName} (iOS ${connectedDevice.info.ProductVersion})`);
     console.log(`  Device ID: ${connectedDevice.info.Identifier}\n`);
 
-    // Only prompt if RSD not already configured
-    if (!iosRSDConfig.address) {
-      console.log('\n📱 iOS tunnel configuration required.');
-      console.log('   Start tunnel in another terminal: sudo pymobiledevice3 remote start-tunnel');
-      console.log('   Then enter the RSD connection info below:\n');
-
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-      });
-
-      return new Promise((resolve) => {
-        rl.question('RSD Address: ', (address) => {
-          rl.question('RSD Port: ', (port) => {
-            iosRSDConfig.address = address.trim();
-            iosRSDConfig.port = port.trim();
-            rl.close();
-            console.log('');
-            resolve();
-          });
-        });
-      });
-    } else {
-      console.log(`✓ iOS tunnel already configured: ${iosRSDConfig.address}:${iosRSDConfig.port}\n`);
+    // --rsd flag or env var already populated iosRSDConfig — skip everything
+    if (iosRSDConfig.address) {
+      console.log(`✓ iOS tunnel configured: ${iosRSDConfig.address}:${iosRSDConfig.port}\n`);
+      return;
     }
+
+    // Auto-tunnel attempt
+    try {
+      const { address, port } = await startTunnel();
+      iosRSDConfig.address = address;
+      iosRSDConfig.port = port;
+      console.log(`\n✓ iOS tunnel ready: ${address} ${port}\n`);
+      return;
+    } catch (autoErr) {
+      console.log(`\n⚠️  Auto-tunnel failed: ${autoErr.message}`);
+      console.log('   Falling back to manual entry...\n');
+    }
+
+    // Fallback: single-line manual prompt
+    console.log('   Run in another terminal:  sudo pymobiledevice3 remote start-tunnel');
+    console.log('   Then paste the address and port below as:  <address> <port>');
+    console.log('   Example:  fd17:e13c:9ab0::1 56673\n');
+
+    // Drain any characters buffered in stdin (e.g. Enter from sudo password prompt)
+    await new Promise(r => setTimeout(r, 100));
+    while (process.stdin.read() !== null) {}
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+
+    await new Promise((resolve) => {
+      rl.question('RSD address and port: ', (answer) => {
+        const parts = answer.trim().split(/\s+/);
+        if (parts.length >= 2) {
+          iosRSDConfig.address = parts[0];
+          iosRSDConfig.port = parts[1];
+        } else {
+          console.log('\n⚠️  No RSD info entered — iOS screenshots will not work.');
+          console.log('   Restart the server to try again.\n');
+        }
+        rl.close();
+        resolve();
+      });
+    });
   }
 }
 
@@ -452,15 +570,17 @@ async function startServer() {
   await promptForIOSConfig();
 
   app.listen(PORT, () => {
-    console.log(`🚀 Mobile Screenshot Server running on http://localhost:${PORT}`);
-    console.log(`📱 Connect your Android (via ADB) or iOS (via USB) device`);
-    console.log(`💡 Test connection: http://localhost:${PORT}/health`);
+    process.stdout.write('\n'); // ensure clean line after any tunnel output
+    console.log(`🚀 Server running on http://localhost:${PORT}`);
 
-    // Check iOS tunnel configuration
     const rsd = getIOSRSDParams();
     if (rsd.configured) {
-      console.log(`✓ iOS tunnel configured: ${rsd.address}:${rsd.port}`);
+      console.log(`✓ iOS tunnel active: ${rsd.address} ${rsd.port}`);
+    } else if (connectedDevice.type === 'ios') {
+      console.log(`⚠️  iOS tunnel not configured — screenshots will fail`);
     }
+
+    console.log('\n  ✅ Ready — switch to Figma and use the plugin\n');
   });
 }
 

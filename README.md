@@ -32,11 +32,7 @@ iOS support requires several steps to enable developer features:
    # or: pip3 install pymobiledevice3
    ```
 
-5. **Start the iOS tunnel** (required for iOS 17+):
-   ```bash
-   sudo pymobiledevice3 remote start-tunnel
-   ```
-   Copy the `RSD Address` and `RSD Port` from the output - you'll need these when starting the server.
+5. **iOS tunnel** (required for iOS 17+): the server starts this automatically when it detects an iOS device. You'll be prompted for your sudo password on first run. No manual setup needed.
 
 ## Prerequisites
 
@@ -76,21 +72,34 @@ npm install
 
 ### 1. Start the Server
 
-**For iOS users:** Make sure the pymobiledevice3 tunnel is running first (see iOS Requirements above).
-
 ```bash
 cd server
 npm start
 ```
 
-**If using iOS**, the server will prompt you to enter the RSD Address and Port from your tunnel.
+**If an iOS device is connected**, the server automatically starts the tunnel — you'll be prompted for your sudo password once. After that, the server comes up ready to use:
 
-You should see:
 ```
+🔍 Detecting connected devices...
+
+✓ Detected: iPhone 15 Pro (iOS 26.x)
+  Device ID: ...
+
+🔌 Starting iOS tunnel automatically...
+   (you may be prompted for your sudo password)
+
+Password: ****
+
+✓ iOS tunnel ready: fd17:e13c:9ab0::1 56673
+
 🚀 Mobile Screenshot Server running on http://localhost:3000
-📱 Connect your Android (via ADB) or iOS (via USB) device
-💡 Test connection: http://localhost:3000/health
-✓ Detected: [Your Device Name]
+```
+
+When you stop the server with Ctrl-C, the tunnel is shut down automatically.
+
+**Optional — skip the prompt entirely** by passing the RSD info directly:
+```bash
+npm start -- --rsd "fd17:e13c:9ab0::1 56673"
 ```
 
 ### 2. Connect Your Device
@@ -107,9 +116,8 @@ You should see:
 
 **For iOS:**
 1. Complete the iOS Requirements steps above (Xcode, pymobiledevice3, Developer Mode, DeveloperDiskImage mounting)
-2. Start the tunnel: `sudo pymobiledevice3 remote start-tunnel`
-3. Start the server and enter the RSD connection info when prompted
-4. Verify connection:
+2. Run `npm start` — the tunnel starts automatically, enter your sudo password when prompted
+3. Verify connection:
    ```bash
    pymobiledevice3 usbmux list
    ```
@@ -137,14 +145,17 @@ You should see:
 ### "No device connected" (iOS)
 - Make sure Developer Mode is enabled on your iPhone/iPad
 - Verify DeveloperDiskImage is mounted (open Xcode → Devices and Simulators)
-- Check tunnel is running: `sudo pymobiledevice3 remote start-tunnel`
 - Verify device shows up: `pymobiledevice3 usbmux list`
-- Restart the server and re-enter RSD connection info
+- Restart the server — it will re-attempt the tunnel automatically
+
+### "Auto-tunnel failed" (iOS)
+- The server will print the error reason and fall back to a manual prompt
+- Paste the RSD address and port as a single value: `fd17:e13c:9ab0::1 56673`
+- To get those values manually: `sudo pymobiledevice3 remote start-tunnel`
 
 ### "Failed to capture screenshot" (iOS)
 - Make sure your device is unlocked
-- Verify tunnel is running (you'll see "Tunnel not running" error if it stopped)
-- Check RSD connection info is correct
+- Verify the tunnel is still running (if it timed out, restart the server)
 - Some apps block screenshots (e.g., banking apps)
 
 ### ADB not found
@@ -174,13 +185,14 @@ mobile-screenshotter/
 
 1. **Local Server**: Express server listens on `localhost:3000` and executes device commands
 2. **Device Detection**: Server detects Android (via ADB) or iOS (via pymobiledevice3) at startup
-3. **Figma Plugin UI**: Makes HTTP requests to the local server to trigger screenshots
-4. **Screenshot Capture**:
+3. **iOS Tunnel**: For iOS devices, the server automatically starts and manages the `pymobiledevice3` tunnel; it is shut down cleanly when the server stops
+4. **Figma Plugin UI**: Makes HTTP requests to the local server to trigger screenshots
+5. **Screenshot Capture**:
    - Android: Uses ADB to capture and pull screenshot
    - iOS: Uses pymobiledevice3 with tunnel connection
-5. **Optimization**: Server converts PNG to JPEG (85% quality) for 93% file size reduction
-6. **Transfer**: Returns screenshot as base64-encoded JPEG
-7. **Plugin**: Creates frame in Figma with the screenshot at logical or physical resolution
+6. **Optimization**: Server converts PNG to JPEG (85% quality) for 93% file size reduction
+7. **Transfer**: Returns screenshot as binary data to the plugin
+8. **Plugin**: Creates frame in Figma with the screenshot at logical or physical resolution
 
 ## Future Enhancements
 
