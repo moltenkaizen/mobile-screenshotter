@@ -5,6 +5,7 @@ const { promisify } = require('util');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const { imageSize } = require('image-size');
 
 const execAsync = promisify(exec);
 const app = express();
@@ -42,16 +43,26 @@ let connectedDevice = {
 
 // Map iPhone ProductType to device specs
 const iPhoneSpecs = {
+  // iPhone 16 family (2024-2025)
+  'iPhone17,1': { name: 'iPhone 16 Pro', width: 1206, height: 2622, scale: 3 },
+  'iPhone17,2': { name: 'iPhone 16 Pro Max', width: 1320, height: 2868, scale: 3 },
+  'iPhone17,3': { name: 'iPhone 16', width: 1179, height: 2556, scale: 3 },
+  'iPhone17,4': { name: 'iPhone 16 Plus', width: 1290, height: 2796, scale: 3 },
+  'iPhone17,5': { name: 'iPhone 16e', width: 1170, height: 2532, scale: 3 },
+  // iPhone 15 family
   'iPhone16,1': { name: 'iPhone 15 Pro', width: 1179, height: 2556, scale: 3 },
   'iPhone16,2': { name: 'iPhone 15 Pro Max', width: 1290, height: 2796, scale: 3 },
   'iPhone15,4': { name: 'iPhone 15 Plus', width: 1290, height: 2796, scale: 3 },
   'iPhone15,5': { name: 'iPhone 15', width: 1179, height: 2556, scale: 3 },
+  // iPhone 14 family
   'iPhone15,2': { name: 'iPhone 14 Pro', width: 1179, height: 2556, scale: 3 },
   'iPhone15,3': { name: 'iPhone 14 Pro Max', width: 1290, height: 2796, scale: 3 },
   'iPhone14,7': { name: 'iPhone 14', width: 1170, height: 2532, scale: 3 },
   'iPhone14,8': { name: 'iPhone 14 Plus', width: 1284, height: 2778, scale: 3 },
+  // iPhone 13 family
   'iPhone14,2': { name: 'iPhone 13 Pro', width: 1170, height: 2532, scale: 3 },
   'iPhone14,3': { name: 'iPhone 13 Pro Max', width: 1284, height: 2778, scale: 3 },
+  // iPhone 12 family
   'iPhone13,2': { name: 'iPhone 12', width: 1170, height: 2532, scale: 3 },
   'iPhone13,3': { name: 'iPhone 12 Pro', width: 1170, height: 2532, scale: 3 },
   'iPhone13,4': { name: 'iPhone 12 Pro Max', width: 1284, height: 2778, scale: 3 },
@@ -101,7 +112,10 @@ async function getAndroidResolution() {
     const { stdout: rotationOutput } = await execAsync('adb shell dumpsys window | grep mCurrentRotation');
     const rotationMatch = rotationOutput.match(/ROTATION_(\d+)/);
     if (rotationMatch) {
-      rotation = parseInt(rotationMatch[1]) / 90;
+      // Some Android builds print the enum value (0..3), others print degrees (0, 90, 180, 270).
+      // Normalize to enum: values < 4 are already the enum, larger values are degrees.
+      const raw = parseInt(rotationMatch[1], 10);
+      rotation = raw < 4 ? raw : raw / 90;
     }
   } catch (e) {
     // If rotation fetch fails, assume portrait (0)
@@ -355,16 +369,33 @@ app.get('/screenshot', async (req, res) => {
     // Get resolution data to include in headers (saves separate fetch)
     let resolutionData = null;
     if (connectedDevice.type === 'ios') {
-      // iOS: Use cached device specs (instant)
+      // iOS: Use cached device specs (instant) and infer orientation from
+      // the captured PNG — iPhoneSpecs are stored portrait, so if the PNG
+      // is wider than tall, the device was rotated.
       const resInfo = getIOSResolution(connectedDevice.info.ProductType);
+      let physical = resInfo.physical;
+      let logical = resInfo.logical;
+      let isLandscape = false;
+      let rotation = 0;
+
+      try {
+        const actual = imageSize(imageBuffer);
+        if (actual.width > actual.height) {
+          physical = { width: physical.height, height: physical.width };
+          logical = { width: logical.height, height: logical.width };
+          isLandscape = true;
+          rotation = 1; // can't distinguish left/right from dims alone
+        }
+      } catch (_) { /* detection failed, fall through as portrait */ }
+
       resolutionData = {
         success: true,
-        physical: resInfo.physical,
-        logical: resInfo.logical,
+        physical,
+        logical,
         density: resInfo.scale * BASE_DENSITY,
         scale: resInfo.scale,
-        rotation: 0,
-        isLandscape: false
+        rotation,
+        isLandscape
       };
     } else if (connectedDevice.type === 'android') {
       // Android: Fetch current resolution (rotation may have changed)
