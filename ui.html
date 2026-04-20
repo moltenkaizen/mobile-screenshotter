@@ -296,12 +296,22 @@
         if (DEBUG) console.log(`[UI] Network fetch: ${Date.now() - fetchStart}ms`);
 
         if (!response.ok) {
-          throw new Error('Screenshot request failed');
+          let msg = `HTTP ${response.status}`;
+          try {
+            const body = await response.json();
+            msg = body.message || body.error || msg;
+          } catch (_) { /* body wasn't JSON */ }
+          throw new Error(msg);
         }
 
         // Get resolution from header (or fallback to separate fetch)
         const resolutionHeader = response.headers.get('X-Resolution');
-        let resolutionData = resolutionHeader ? JSON.parse(resolutionHeader) : null;
+        let resolutionData = null;
+        if (resolutionHeader) {
+          try {
+            resolutionData = JSON.parse(resolutionHeader);
+          } catch (_) { /* malformed header — fall through to /resolution fetch */ }
+        }
         if (!resolutionData || !resolutionData.success) {
           const resResponse = await fetchWithTimeout(`${SERVER_URL}/resolution`);
           resolutionData = await resResponse.json();

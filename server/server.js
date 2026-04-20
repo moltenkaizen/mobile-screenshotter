@@ -136,8 +136,21 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// Tracks whether the underlying CLI was missing (vs. installed but no device).
+// Used at startup to give the user a clearer hint about what to install.
+let detectionDiagnostics = { adbMissing: false, pymd3Missing: false };
+
+function isCommandMissing(err) {
+  if (!err) return false;
+  if (err.code === 127 || err.code === 'ENOENT') return true;
+  const text = (err.stderr || err.message || '').toLowerCase();
+  return text.includes('command not found') || text.includes('not recognized');
+}
+
 // Device type detection function (runs once at startup)
 async function detectAndStoreDevice() {
+  detectionDiagnostics = { adbMissing: false, pymd3Missing: false };
+
   // Try Android first
   try {
     const { stdout: adbOutput } = await execAsync('adb devices');
@@ -156,7 +169,7 @@ async function detectAndStoreDevice() {
       return;
     }
   } catch (e) {
-    // ADB not available or no devices
+    if (isCommandMissing(e)) detectionDiagnostics.adbMissing = true;
   }
 
   // Try iOS using pymobiledevice3
@@ -178,7 +191,7 @@ async function detectAndStoreDevice() {
       }
     }
   } catch (e) {
-    // pymobiledevice3 not available or no devices
+    if (isCommandMissing(e)) detectionDiagnostics.pymd3Missing = true;
   }
 
   // No device found
@@ -470,7 +483,19 @@ async function promptForIOSConfig() {
 
   if (!connectedDevice.connected) {
     console.log('❌ No device detected');
-    console.log('   Connect an Android device (via ADB) or iOS device (via USB)\n');
+    const { adbMissing, pymd3Missing } = detectionDiagnostics;
+    if (adbMissing && pymd3Missing) {
+      console.log('   Neither `adb` nor `pymobiledevice3` was found in PATH.');
+      console.log('   Install Android platform-tools and/or pymobiledevice3 per the README.\n');
+    } else if (adbMissing) {
+      console.log('   `adb` not found in PATH — install Android platform-tools for Android support.');
+      console.log('   (iOS detection ran but found no device.)\n');
+    } else if (pymd3Missing) {
+      console.log('   `pymobiledevice3` not found in PATH — install it for iOS support.');
+      console.log('   (Android detection ran but found no device.)\n');
+    } else {
+      console.log('   Connect an Android device (via ADB) or iOS device (via USB)\n');
+    }
     return;
   }
 
