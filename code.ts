@@ -6,9 +6,13 @@ interface ResolutionData {
   logical: { width: number; height: number };
   density: number;
   scale: number;
+  rotation?: number;
+  isLandscape?: boolean;
 }
 
-// Show the plugin UI
+// Flip to `true` to see per-stage timing in the dev console.
+const DEBUG = false;
+
 figma.showUI(__html__, { width: 280, height: 295 });
 
 // Handle messages from the UI
@@ -22,9 +26,9 @@ figma.ui.onmessage = async (msg: {
   if (msg.type === 'create-screenshot') {
     try {
       const totalStart = Date.now();
-      console.log('[FIGMA] ========== Processing screenshot ==========');
+      if (DEBUG) console.log('[FIGMA] ========== Processing screenshot ==========');
       if (msg.startTime) {
-        console.log(`[FIGMA] Time since button click: ${totalStart - msg.startTime}ms`);
+        if (DEBUG) console.log(`[FIGMA] Time since button click: ${totalStart - msg.startTime}ms`);
       }
 
       if (!msg.imageData || !msg.resolutionData) {
@@ -34,19 +38,19 @@ figma.ui.onmessage = async (msg: {
 
       let start = Date.now();
       const bytes = new Uint8Array(msg.imageData);
-      console.log(`[FIGMA] Uint8Array conversion: ${Date.now() - start}ms (${(bytes.length / 1024).toFixed(0)} KB)`);
+      if (DEBUG) console.log(`[FIGMA] Uint8Array conversion: ${Date.now() - start}ms (${(bytes.length / 1024).toFixed(0)} KB)`);
 
       start = Date.now();
       const image = figma.createImage(bytes);
-      console.log(`[FIGMA] createImage: ${Date.now() - start}ms`);
+      if (DEBUG) console.log(`[FIGMA] createImage: ${Date.now() - start}ms`);
 
       start = Date.now();
       const imageHash = image.hash;
-      console.log(`[FIGMA] get hash: ${Date.now() - start}ms`);
+      if (DEBUG) console.log(`[FIGMA] get hash: ${Date.now() - start}ms`);
 
       start = Date.now();
       const { width: physicalWidth, height: physicalHeight } = await image.getSizeAsync();
-      console.log(`[FIGMA] getSizeAsync: ${Date.now() - start}ms (${physicalWidth}x${physicalHeight})`);
+      if (DEBUG) console.log(`[FIGMA] getSizeAsync: ${Date.now() - start}ms (${physicalWidth}x${physicalHeight})`);
 
       start = Date.now();
       // Always create frame, use logical or physical size based on toggle
@@ -55,10 +59,10 @@ figma.ui.onmessage = async (msg: {
         msg.resolutionData,
         msg.useLogicalSize ?? true
       );
-      console.log(`[FIGMA] createFramedScreenshot: ${Date.now() - start}ms`);
-      console.log(`[FIGMA] ========== Figma processing: ${Date.now() - totalStart}ms ==========`);
+      if (DEBUG) console.log(`[FIGMA] createFramedScreenshot: ${Date.now() - start}ms`);
+      if (DEBUG) console.log(`[FIGMA] ========== Figma processing: ${Date.now() - totalStart}ms ==========`);
       if (msg.startTime) {
-        console.log(`[FIGMA] ========== END-TO-END: ${Date.now() - msg.startTime}ms ==========`);
+        if (DEBUG) console.log(`[FIGMA] ========== END-TO-END: ${Date.now() - msg.startTime}ms ==========`);
       }
     } catch (error: unknown) {
       console.error('Error creating screenshot:', error);
@@ -77,7 +81,7 @@ async function createFramedScreenshot(
 
   // Create frame
   const frame = figma.createFrame();
-  console.log(`[FRAME] createFrame: ${Date.now() - start}ms`);
+  if (DEBUG) console.log(`[FRAME] createFrame: ${Date.now() - start}ms`);
 
   // Generate timestamp for frame name
   const now = new Date();
@@ -100,22 +104,22 @@ async function createFramedScreenshot(
   // Resize frame
   start = Date.now();
   frame.resize(frameWidth, frameHeight);
-  console.log(`[FRAME] resize frame: ${Date.now() - start}ms`);
+  if (DEBUG) console.log(`[FRAME] resize frame: ${Date.now() - start}ms`);
 
   // Create image rectangle
   start = Date.now();
   const imageRect = figma.createRectangle();
   imageRect.name = 'Screenshot Image';
-  console.log(`[FRAME] createRectangle: ${Date.now() - start}ms`);
+  if (DEBUG) console.log(`[FRAME] createRectangle: ${Date.now() - start}ms`);
 
   // Resize image to match frame dimensions
   start = Date.now();
   imageRect.resize(frameWidth, frameHeight);
-  console.log(`[FRAME] resize rect: ${Date.now() - start}ms`);
+  if (DEBUG) console.log(`[FRAME] resize rect: ${Date.now() - start}ms`);
 
   start = Date.now();
   imageRect.fills = [{ type: 'IMAGE', imageHash: imageHash, scaleMode: 'FILL' }];
-  console.log(`[FRAME] set fills: ${Date.now() - start}ms`);
+  if (DEBUG) console.log(`[FRAME] set fills: ${Date.now() - start}ms`);
 
   // Set constraints to STRETCH in both directions
   imageRect.constraints = {
@@ -126,7 +130,7 @@ async function createFramedScreenshot(
   // Add image to frame
   start = Date.now();
   frame.appendChild(imageRect);
-  console.log(`[FRAME] appendChild to frame: ${Date.now() - start}ms`);
+  if (DEBUG) console.log(`[FRAME] appendChild to frame: ${Date.now() - start}ms`);
 
   // Find the best parent container (Section or page)
   const viewport = figma.viewport.center;
@@ -135,7 +139,7 @@ async function createFramedScreenshot(
   // Check if viewport center is inside any Section (sections are always top-level)
   start = Date.now();
   const sections = figma.currentPage.children.filter(node => node.type === 'SECTION') as SectionNode[];
-  console.log(`[FRAME] filter sections: ${Date.now() - start}ms (found ${sections.length})`);
+  if (DEBUG) console.log(`[FRAME] filter sections: ${Date.now() - start}ms (found ${sections.length})`);
 
   for (const section of sections) {
     if (viewport.x >= section.x &&
@@ -159,11 +163,11 @@ async function createFramedScreenshot(
   // Add to parent container and select
   start = Date.now();
   parentContainer.appendChild(frame);
-  console.log(`[FRAME] appendChild to parent: ${Date.now() - start}ms`);
+  if (DEBUG) console.log(`[FRAME] appendChild to parent: ${Date.now() - start}ms`);
 
   start = Date.now();
   figma.currentPage.selection = [frame];
-  console.log(`[FRAME] set selection: ${Date.now() - start}ms`);
+  if (DEBUG) console.log(`[FRAME] set selection: ${Date.now() - start}ms`);
 
   figma.notify('Screenshot added to canvas!');
 }

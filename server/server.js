@@ -5,7 +5,6 @@ const { promisify } = require('util');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const sharp = require('sharp');
 
 const execAsync = promisify(exec);
 const app = express();
@@ -308,7 +307,6 @@ app.get('/resolution', async (req, res) => {
 // Take screenshot endpoint
 app.get('/screenshot', async (req, res) => {
   const tempFile = path.join(__dirname, 'temp_screenshot.png');
-  let finalFile = tempFile; // Track which file to read (PNG or JPEG)
 
   if (!connectedDevice.connected) {
     return res.status(400).json({ error: 'No device connected' });
@@ -338,22 +336,8 @@ app.get('/screenshot', async (req, res) => {
       }
     }
 
-    // Image format conversion (comment/uncomment to switch)
-    // --- JPEG (smaller, faster transfer, some artifacts) ---
-    // const jpegFile = tempFile.replace('.png', '.jpg');
-    // await sharp(tempFile)
-    //   .jpeg({ quality: 95 })
-    //   .toFile(jpegFile);
-    // fs.unlinkSync(tempFile);
-    // finalFile = jpegFile;
-    // --- PNG (lossless, larger files) ---
-    // No conversion needed, already PNG
-
-    // Read the screenshot file
-    const imageBuffer = fs.readFileSync(finalFile);
-
-    // Clean up temp file
-    fs.unlinkSync(finalFile);
+    const imageBuffer = fs.readFileSync(tempFile);
+    fs.unlinkSync(tempFile);
 
     // Get resolution data to include in headers (saves separate fetch)
     let resolutionData = null;
@@ -386,12 +370,8 @@ app.get('/screenshot', async (req, res) => {
   } catch (error) {
     console.error('Screenshot error:', error);
 
-    // Clean up temp files if they exist
     if (fs.existsSync(tempFile)) {
       fs.unlinkSync(tempFile);
-    }
-    if (finalFile !== tempFile && fs.existsSync(finalFile)) {
-      fs.unlinkSync(finalFile);
     }
 
     res.status(500).json({
