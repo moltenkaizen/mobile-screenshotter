@@ -3,7 +3,9 @@ const cors = require('cors');
 const { exec, spawn } = require('child_process');
 const { promisify } = require('util');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const readline = require('readline');
 const { imageSize } = require('image-size');
 
@@ -11,6 +13,12 @@ const execAsync = promisify(exec);
 const app = express();
 const PORT = 3000;
 const BASE_DENSITY = 160; // Android baseline density (mdpi)
+const QUICK_TIMEOUT = 15000;       // fast device queries (adb/pymd3 info)
+const SCREENSHOT_TIMEOUT = 30000;  // screenshot capture may be slower
+
+function makeTempPath() {
+  return path.join(os.tmpdir(), `mobile-screenshot-${crypto.randomUUID()}.png`);
+}
 
 // Store RSD params in memory (set via env vars, --rsd flag, or interactive prompt)
 let iosRSDConfig = {
@@ -94,14 +102,14 @@ function getIOSResolution(productType) {
 // Get Android resolution (extracted to avoid duplication)
 async function getAndroidResolution() {
   // Get physical size (always in default/portrait orientation)
-  const { stdout: sizeOutput } = await execAsync('adb shell wm size');
+  const { stdout: sizeOutput } = await execAsync('adb shell wm size', { timeout: QUICK_TIMEOUT });
   const sizeMatch = sizeOutput.match(/(\d+)x(\d+)/);
   if (!sizeMatch) throw new Error('Could not parse screen size');
   let physicalWidth = parseInt(sizeMatch[1]);
   let physicalHeight = parseInt(sizeMatch[2]);
 
   // Get density
-  const { stdout: densityOutput } = await execAsync('adb shell wm density');
+  const { stdout: densityOutput } = await execAsync('adb shell wm density', { timeout: QUICK_TIMEOUT });
   const densityMatch = densityOutput.match(/density:\s*(\d+)/);
   if (!densityMatch) throw new Error('Could not parse screen density');
   const density = parseInt(densityMatch[1]);
@@ -109,7 +117,7 @@ async function getAndroidResolution() {
   // Get current rotation (0=portrait, 1=landscape-left, 2=upside-down, 3=landscape-right)
   let rotation = 0;
   try {
-    const { stdout: rotationOutput } = await execAsync('adb shell dumpsys window | grep mCurrentRotation');
+    const { stdout: rotationOutput } = await execAsync('adb shell dumpsys window | grep mCurrentRotation', { timeout: QUICK_TIMEOUT });
     const rotationMatch = rotationOutput.match(/ROTATION_(\d+)/);
     if (rotationMatch) {
       // Some Android builds print the enum value (0..3), others print degrees (0, 90, 180, 270).
@@ -167,7 +175,7 @@ async function detectAndStoreDevice() {
 
   // Try Android first
   try {
-    const { stdout: adbOutput } = await execAsync('adb devices');
+    const { stdout: adbOutput } = await execAsync('adb devices', { timeout: QUICK_TIMEOUT });
     const androidDevices = adbOutput.split('\n')
       .filter(line => line.trim() && !line.includes('List of devices'))
       .filter(line => line.includes('\tdevice'));
@@ -188,7 +196,7 @@ async function detectAndStoreDevice() {
 
   // Try iOS using pymobiledevice3
   try {
-    const { stdout: iosOutput } = await execAsync('pymobiledevice3 usbmux list');
+    const { stdout: iosOutput } = await execAsync('pymobiledevice3 usbmux list', { timeout: QUICK_TIMEOUT });
     // Parse JSON output from pymobiledevice3
     const devices = JSON.parse(iosOutput);
     if (devices && devices.length > 0) {
@@ -247,6 +255,12 @@ app.get('/health', (req, res) => {
 
 // Check if device is connected (Android or iOS)
 app.get('/device', async (req, res) => {
+  // Re-run detection if we previously saw no device — supports plugging in
+  // after server start without requiring a restart.
+  if (!connectedDevice.connected) {
+    await detectAndStoreDevice();
+  }
+
   if (!connectedDevice.connected) {
     return res.json({ connected: false, message: 'No device connected' });
   }
@@ -257,14 +271,14 @@ app.get('/device', async (req, res) => {
       let manufacturer = 'Unknown';
       let model = 'Unknown';
       try {
-        const { stdout: mfgOutput } = await execAsync('adb shell getprop ro.product.manufacturer');
+        const { stdout: mfgOutput } = await execAsync('adb shell getprop ro.product.manufacturer', { timeout: QUICK_TIMEOUT });
         manufacturer = mfgOutput.trim();
       } catch (e) {
         // If getprop fails, use default
       }
 
       try {
-        const { stdout: modelOutput } = await execAsync('adb shell getprop ro.product.model');
+        const { stdout: modelOutput } = await execAsync('adb shell getprop ro.product.model', { timeout: QUICK_TIMEOUT });
         model = modelOutput.trim();
       } catch (e) {
         // If getprop fails, use default
@@ -285,6 +299,9 @@ app.get('/device', async (req, res) => {
       });
     }
   } else if (connectedDevice.type === 'ios') {
+    if (!connectedDevice.info) {
+      return res.status(500).json({ connected: false, error: 'iOS device missing info' });
+    }
     // Use stored device info - no need to call pymobiledevice3 again!
     res.json({
       connected: true,
@@ -309,6 +326,9 @@ app.get('/resolution', async (req, res) => {
       const resolutionData = await getAndroidResolution();
       res.json(resolutionData);
     } else if (connectedDevice.type === 'ios') {
+      if (!connectedDevice.info) {
+        return res.status(500).json({ error: 'iOS device missing info' });
+      }
       const resolutionInfo = getIOSResolution(connectedDevice.info.ProductType);
       res.json({
         success: true,
@@ -333,23 +353,32 @@ app.get('/resolution', async (req, res) => {
 
 // Take screenshot endpoint
 app.get('/screenshot', async (req, res) => {
-  const tempFile = path.join(__dirname, 'temp_screenshot.png');
+  // Re-run detection if we previously saw no device — supports plugging in
+  // after server start without requiring a restart.
+  if (!connectedDevice.connected) {
+    await detectAndStoreDevice();
+  }
 
   if (!connectedDevice.connected) {
     return res.status(400).json({ error: 'No device connected' });
   }
 
+  const tempFile = makeTempPath();
+
   try {
     if (connectedDevice.type === 'android') {
       // Stream screenshot directly from device (faster than file-based approach)
-      await execAsync(`adb exec-out screencap -p > "${tempFile}"`, { maxBuffer: 50 * 1024 * 1024 });
+      await execAsync(`adb exec-out screencap -p > "${tempFile}"`, { timeout: SCREENSHOT_TIMEOUT, maxBuffer: 50 * 1024 * 1024 });
     } else if (connectedDevice.type === 'ios') {
+      if (!connectedDevice.info) {
+        return res.status(500).json({ error: 'iOS device missing info' });
+      }
       // Take screenshot using pymobiledevice3 with RSD params
       try {
         const cmd = buildPymobiledevice3Command(
           `pymobiledevice3 developer dvt screenshot "${tempFile}"`
         );
-        await execAsync(cmd);
+        await execAsync(cmd, { timeout: SCREENSHOT_TIMEOUT });
       } catch (error) {
         // If error mentions tunnel, provide helpful message
         if (error.message && (error.message.includes('tunneld') || error.message.includes('RemoteXPC'))) {
@@ -533,8 +562,8 @@ async function promptForIOSConfig() {
   if (connectedDevice.type === 'android') {
     // Get Android device details
     try {
-      const { stdout: manufacturer } = await execAsync('adb shell getprop ro.product.manufacturer');
-      const { stdout: model } = await execAsync('adb shell getprop ro.product.model');
+      const { stdout: manufacturer } = await execAsync('adb shell getprop ro.product.manufacturer', { timeout: QUICK_TIMEOUT });
+      const { stdout: model } = await execAsync('adb shell getprop ro.product.model', { timeout: QUICK_TIMEOUT });
       console.log(`✓ Detected: ${manufacturer.trim()} ${model.trim()} (Android)`);
       console.log(`  Device ID: ${connectedDevice.id}\n`);
     } catch (e) {
