@@ -20,6 +20,20 @@ function makeTempPath() {
   return path.join(os.tmpdir(), `mobile-screenshot-${crypto.randomUUID()}.png`);
 }
 
+// Reject anything that isn't a plain IPv4/IPv6 literal or numeric port, so
+// values from CLI args / env / interactive input can't inject shell metachars
+// when interpolated into the pymobiledevice3 command.
+function isValidRSDAddress(addr) {
+  if (typeof addr !== 'string') return false;
+  if (addr.length === 0 || addr.length > 64) return false;
+  return /^[0-9a-fA-F:.%]+$/.test(addr);
+}
+
+function isValidRSDPort(port) {
+  const n = Number(port);
+  return Number.isInteger(n) && n >= 1 && n <= 65535;
+}
+
 // Store RSD params in memory (set via env vars, --rsd flag, or interactive prompt)
 let iosRSDConfig = {
   address: process.env.IOS_RSD_ADDRESS || null,
@@ -40,6 +54,16 @@ let tunnelProcess = null;
     }
   }
 })();
+
+// Drop env/CLI-provided values that fail validation so they can't reach exec.
+if (iosRSDConfig.address && !isValidRSDAddress(iosRSDConfig.address)) {
+  console.log('⚠️  Ignoring invalid IOS_RSD_ADDRESS / --rsd address value.');
+  iosRSDConfig.address = null;
+}
+if (iosRSDConfig.port && !isValidRSDPort(iosRSDConfig.port)) {
+  console.log('⚠️  Ignoring invalid IOS_RSD_PORT / --rsd port value.');
+  iosRSDConfig.port = null;
+}
 
 // Store detected device info (set once at startup)
 let connectedDevice = {
@@ -152,8 +176,11 @@ async function getAndroidResolution() {
   };
 }
 
-// Enable CORS for Figma plugin
+// Enable CORS for Figma plugin only. Plugin iframes run sandboxed with a
+// null origin, so we restrict to that — any regular web page a user visits
+// will be rejected even if it discovers the loopback port.
 app.use(cors({
+  origin: 'null',
   exposedHeaders: ['X-Resolution']
 }));
 app.use(express.json());
@@ -243,6 +270,10 @@ function buildPymobiledevice3Command(baseCommand) {
 
   if (!rsd.configured) {
     throw new Error(rsd.instructions);
+  }
+
+  if (!isValidRSDAddress(rsd.address) || !isValidRSDPort(rsd.port)) {
+    throw new Error('Invalid iOS tunnel RSD parameters — restart the server and re-enter them.');
   }
 
   return `${baseCommand} --rsd ${rsd.address} ${rsd.port}`;
@@ -491,19 +522,23 @@ function startTunnel() {
     const timer = setTimeout(() => fail(new Error('Timed out waiting for tunnel (60s)')), 60000);
 
     function tryParse(buf) {
+      const accept = (addr, port) => {
+        if (isValidRSDAddress(addr) && isValidRSDPort(port)) done(addr, port);
+      };
+
       for (const line of buf.split('\n')) {
         const t = line.trim();
         if (!t) continue;
 
         // "--rsd fd17:e13c:9ab0::1 56673" (confirmed real output format)
-        const rsdMatch = t.match(/--rsd\s+([\S]+)\s+(\d+)/);
-        if (rsdMatch) return done(rsdMatch[1], rsdMatch[2]);
+        const rsdMatch = t.match(/--rsd\s+([0-9a-fA-F:.%]+)\s+(\d+)/);
+        if (rsdMatch) return accept(rsdMatch[1], rsdMatch[2]);
       }
 
       // Multi-line fallback: "RSD Address:" followed by "RSD Port:"
-      const addrMatch = buf.match(/RSD Address:\s*([\S]+)/i);
+      const addrMatch = buf.match(/RSD Address:\s*([0-9a-fA-F:.%]+)/i);
       const portMatch = buf.match(/RSD Port:\s*(\d+)/i);
-      if (addrMatch && portMatch) return done(addrMatch[1], portMatch[1]);
+      if (addrMatch && portMatch) return accept(addrMatch[1], portMatch[1]);
     }
 
     child.stdout.on('data', () => {}); // drain stdout (unused without --script-mode)
@@ -616,9 +651,12 @@ async function promptForIOSConfig() {
     await new Promise((resolve) => {
       rl.question('RSD address and port: ', (answer) => {
         const parts = answer.trim().split(/\s+/);
-        if (parts.length >= 2) {
+        if (parts.length >= 2 && isValidRSDAddress(parts[0]) && isValidRSDPort(parts[1])) {
           iosRSDConfig.address = parts[0];
           iosRSDConfig.port = parts[1];
+        } else if (parts.length >= 2) {
+          console.log('\n⚠️  Invalid RSD address or port — iOS screenshots will not work.');
+          console.log('   Restart the server to try again.\n');
         } else {
           console.log('\n⚠️  No RSD info entered — iOS screenshots will not work.');
           console.log('   Restart the server to try again.\n');
@@ -634,9 +672,12 @@ async function promptForIOSConfig() {
 async function startServer() {
   await promptForIOSConfig();
 
-  app.listen(PORT, () => {
+  // Bind to loopback explicitly — the plugin connects via localhost, and
+  // binding to 0.0.0.0 would expose device control + screenshots to anyone
+  // on the same network.
+  app.listen(PORT, '127.0.0.1', () => {
     process.stdout.write('\n'); // ensure clean line after any tunnel output
-    console.log(`🚀 Server running on http://localhost:${PORT}`);
+    console.log(`🚀 Server running on http://127.0.0.1:${PORT}`);
 
     const rsd = getIOSRSDParams();
     if (rsd.configured) {
