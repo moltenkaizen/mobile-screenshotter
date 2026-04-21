@@ -32,7 +32,11 @@ iOS support requires several steps to enable developer features:
    # or: pip3 install pymobiledevice3
    ```
 
-5. **iOS tunnel** (required for iOS 17+): the server starts this automatically when it detects an iOS device. You'll be prompted for your sudo password on first run. No manual setup needed.
+5. **iOS tunnel** (required for iOS 17+): you run this yourself in a separate terminal:
+   ```bash
+   sudo pymobiledevice3 remote start-tunnel
+   ```
+   Leave it running, then paste its `--rsd <addr> <port>` output into the server prompt when you start the server.
 
 ## Prerequisites
 
@@ -77,7 +81,7 @@ cd server
 npm start
 ```
 
-**If an iOS device is connected**, the server automatically starts the tunnel — you'll be prompted for your sudo password once. After that, the server comes up ready to use:
+**If an iOS device is connected**, the server will prompt you for RSD values from a tunnel you've started separately:
 
 ```
 🔍 Detecting connected devices...
@@ -85,21 +89,25 @@ npm start
 ✓ Detected: iPhone 15 Pro (iOS 26.x)
   Device ID: ...
 
-🔌 Starting iOS tunnel automatically...
-   (you may be prompted for your sudo password)
+iOS tunnel required:
+  1. In another terminal, run:  sudo pymobiledevice3 remote start-tunnel
+  2. Paste its `--rsd <addr> <port>` line below (with or without the --rsd).
+     e.g.  --rsd fd17:e13c:9ab0::1 56673
 
-Password: ****
+RSD: --rsd fd17:e13c:9ab0::1 56673
 
-✓ iOS tunnel ready: fd17:e13c:9ab0::1 56673
+✓ iOS tunnel configured: fd17:e13c:9ab0::1 56673
 
-🚀 Mobile Screenshot Server running on http://localhost:3000
+🚀 Server running on http://127.0.0.1:3000
 ```
 
-When you stop the server with Ctrl-C, the tunnel is shut down automatically.
-
-**Optional — skip the prompt entirely** by passing the RSD info directly:
+**Optional — skip the prompt** by passing RSD info directly:
 ```bash
 npm start -- --rsd "fd17:e13c:9ab0::1 56673"
+```
+Or via environment variables:
+```bash
+IOS_RSD_ADDRESS=fd17:e13c:9ab0::1 IOS_RSD_PORT=56673 npm start
 ```
 
 ### 2. Connect Your Device
@@ -115,9 +123,13 @@ npm start -- --rsd "fd17:e13c:9ab0::1 56673"
    Should show your device listed
 
 **For iOS:**
-1. Complete the iOS Requirements steps above (Xcode, pymobiledevice3, Developer Mode, DeveloperDiskImage mounting)
-2. Run `npm start` — the tunnel starts automatically, enter your sudo password when prompted
-3. Verify connection:
+1. Complete the iOS Requirements steps above (pymobiledevice3, Developer Mode, DeveloperDiskImage mounting)
+2. In a separate terminal, start the tunnel (needs sudo, leave it running):
+   ```bash
+   sudo pymobiledevice3 remote start-tunnel
+   ```
+3. Run `npm start` and paste the tunnel's `--rsd <addr> <port>` output at the prompt
+4. Verify connection:
    ```bash
    pymobiledevice3 usbmux list
    ```
@@ -144,14 +156,14 @@ npm start -- --rsd "fd17:e13c:9ab0::1 56673"
 
 ### "No device connected" (iOS)
 - Make sure Developer Mode is enabled on your iPhone/iPad
-- Verify DeveloperDiskImage is mounted (open Xcode → Devices and Simulators)
+- Verify DeveloperDiskImage is mounted (open Xcode → Devices and Simulators, or use `pymobiledevice3 mounter auto-mount`)
 - Verify device shows up: `pymobiledevice3 usbmux list`
-- Restart the server — it will re-attempt the tunnel automatically
+- Click "Check Connection" in the plugin after plugging in your device
 
-### "Auto-tunnel failed" (iOS)
-- The server will print the error reason and fall back to a manual prompt
-- Paste the RSD address and port as a single value: `fd17:e13c:9ab0::1 56673`
-- To get those values manually: `sudo pymobiledevice3 remote start-tunnel`
+### "Invalid RSD values" at the server prompt
+- The RSD address must be an IPv4/IPv6 literal (e.g. `fd17:e13c:9ab0::1`); the port is 1–65535
+- Paste the `--rsd` line verbatim from `sudo pymobiledevice3 remote start-tunnel` — the server strips the leading `--rsd` automatically
+- The prompt loops on bad input, so you can retry without restarting the server
 
 ### "Failed to capture screenshot" (iOS)
 - Make sure your device is unlocked

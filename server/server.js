@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { exec, spawn } = require('child_process');
+const { exec } = require('child_process');
 const { promisify } = require('util');
 const fs = require('fs');
 const os = require('os');
@@ -39,9 +39,6 @@ let iosRSDConfig = {
   address: process.env.IOS_RSD_ADDRESS || null,
   port: process.env.IOS_RSD_PORT || null
 };
-
-// Handle to the auto-spawned tunnel child process (iOS only)
-let tunnelProcess = null;
 
 // Parse --rsd "address port" from CLI args (e.g. npm start -- --rsd "fd17:e13c:9ab0::1 56673")
 (function parseArgv() {
@@ -176,11 +173,15 @@ async function getAndroidResolution() {
   };
 }
 
-// Enable CORS for Figma plugin only. Plugin iframes run sandboxed with a
-// null origin, so we restrict to that — any regular web page a user visits
-// will be rejected even if it discovers the loopback port.
+// Enable CORS for Figma plugin only. Plugin iframes run sandboxed so the
+// browser sends `Origin: null`; some clients (curl, same-process) send no
+// Origin at all. Reject any *real* origin so drive-by web pages can't fetch
+// /screenshot even though we're bound to loopback.
 app.use(cors({
-  origin: 'null',
+  origin: (origin, cb) => {
+    if (!origin || origin === 'null') return cb(null, true);
+    return cb(new Error('Origin not allowed by CORS'));
+  },
   exposedHeaders: ['X-Resolution']
 }));
 app.use(express.json());
@@ -485,92 +486,6 @@ app.get('/screenshot', async (req, res) => {
   }
 });
 
-// Attempt to auto-spawn the iOS tunnel. Resolves with { address, port } on success, rejects otherwise.
-function startTunnel() {
-  return new Promise((resolve, reject) => {
-    console.log('🔌 Starting iOS tunnel automatically...');
-    console.log('   (you may be prompted for your sudo password)\n');
-
-    const child = spawn(
-      'sudo',
-      ['pymobiledevice3', 'remote', 'start-tunnel'],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-
-    tunnelProcess = child;
-
-    let stderrBuf = '';
-    let resolved = false;
-
-    const done = (address, port) => {
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timer);
-      resolve({ address, port });
-    };
-
-    const fail = (err) => {
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timer);
-      try { child.kill(); } catch (_) {}
-      tunnelProcess = null;
-      reject(err);
-    };
-
-    // Give the user time to type their sudo password and for the tunnel to initialise
-    const timer = setTimeout(() => fail(new Error('Timed out waiting for tunnel (60s)')), 60000);
-
-    function tryParse(buf) {
-      const accept = (addr, port) => {
-        if (isValidRSDAddress(addr) && isValidRSDPort(port)) done(addr, port);
-      };
-
-      for (const line of buf.split('\n')) {
-        const t = line.trim();
-        if (!t) continue;
-
-        // "--rsd fd17:e13c:9ab0::1 56673" (confirmed real output format)
-        const rsdMatch = t.match(/--rsd\s+([0-9a-fA-F:.%]+)\s+(\d+)/);
-        if (rsdMatch) return accept(rsdMatch[1], rsdMatch[2]);
-      }
-
-      // Multi-line fallback: "RSD Address:" followed by "RSD Port:"
-      const addrMatch = buf.match(/RSD Address:\s*([0-9a-fA-F:.%]+)/i);
-      const portMatch = buf.match(/RSD Port:\s*(\d+)/i);
-      if (addrMatch && portMatch) return accept(addrMatch[1], portMatch[1]);
-    }
-
-    child.stdout.on('data', () => {}); // drain stdout (unused without --script-mode)
-
-    child.stderr.on('data', (chunk) => {
-      stderrBuf += chunk.toString(); // buffer silently; only shown on failure
-      tryParse(stderrBuf);
-    });
-
-    child.on('error', (err) => fail(new Error(`Failed to spawn tunnel: ${err.message}`)));
-
-    child.on('close', (code) => {
-      if (!resolved) {
-        if (stderrBuf) process.stderr.write(stderrBuf); // show suppressed output on failure
-        fail(new Error(`Tunnel process exited early (code ${code})`));
-      }
-    });
-  });
-}
-
-// Clean up tunnel child process on server exit
-function cleanupTunnel() {
-  if (tunnelProcess) {
-    console.log('\n🔌 Stopping tunnel...');
-    tunnelProcess.kill('SIGTERM');
-    tunnelProcess = null;
-  }
-}
-
-process.on('SIGINT',  () => { cleanupTunnel(); process.exit(0); });
-process.on('SIGTERM', () => { cleanupTunnel(); process.exit(0); });
-
 // Prompt for iOS RSD configuration if needed
 async function promptForIOSConfig() {
   console.log('🔍 Detecting connected devices...\n');
@@ -622,49 +537,50 @@ async function promptForIOSConfig() {
       return;
     }
 
-    // Auto-tunnel attempt
-    try {
-      const { address, port } = await startTunnel();
-      iosRSDConfig.address = address;
-      iosRSDConfig.port = port;
-      console.log(`\n✓ iOS tunnel ready: ${address} ${port}\n`);
-      return;
-    } catch (autoErr) {
-      console.log(`\n⚠️  Auto-tunnel failed: ${autoErr.message}`);
-      console.log('   Falling back to manual entry...\n');
+    await interactiveTunnelSetup();
+  }
+}
+
+function askOnce(prompt) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(prompt, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
+// Ask for an RSD address/port from a user-managed tunnel. We intentionally
+// don't auto-spawn `sudo pymobiledevice3 remote start-tunnel` ourselves —
+// letting the user run it in a separate terminal avoids the TTY/password
+// kludge and keeps this process unprivileged.
+async function interactiveTunnelSetup() {
+  console.log('iOS tunnel required:');
+  console.log('  1. In another terminal, run:  sudo pymobiledevice3 remote start-tunnel');
+  console.log('  2. Paste its `--rsd <addr> <port>` line below (with or without the --rsd).');
+  console.log('     e.g.  --rsd fd17:e13c:9ab0::1 56673');
+  console.log('');
+
+  while (true) {
+    const answer = (await askOnce('RSD: ')).trim();
+
+    if (answer === '') {
+      console.log('⚠️  No input. Paste the --rsd line from your tunnel, or Ctrl+C to abort.\n');
+      continue;
     }
 
-    // Fallback: single-line manual prompt
-    console.log('   Run in another terminal:  sudo pymobiledevice3 remote start-tunnel');
-    console.log('   Then paste the address and port below as:  <address> <port>');
-    console.log('   Example:  fd17:e13c:9ab0::1 56673\n');
+    let parts = answer.split(/\s+/);
+    if (parts[0] === '--rsd') parts = parts.slice(1);
 
-    // Drain any characters buffered in stdin (e.g. Enter from sudo password prompt)
-    await new Promise(r => setTimeout(r, 100));
-    while (process.stdin.read() !== null) {}
+    if (parts.length >= 2 && isValidRSDAddress(parts[0]) && isValidRSDPort(parts[1])) {
+      iosRSDConfig.address = parts[0];
+      iosRSDConfig.port = parts[1];
+      console.log(`\n✓ iOS tunnel configured: ${parts[0]} ${parts[1]}\n`);
+      return;
+    }
 
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout
-    });
-
-    await new Promise((resolve) => {
-      rl.question('RSD address and port: ', (answer) => {
-        const parts = answer.trim().split(/\s+/);
-        if (parts.length >= 2 && isValidRSDAddress(parts[0]) && isValidRSDPort(parts[1])) {
-          iosRSDConfig.address = parts[0];
-          iosRSDConfig.port = parts[1];
-        } else if (parts.length >= 2) {
-          console.log('\n⚠️  Invalid RSD address or port — iOS screenshots will not work.');
-          console.log('   Restart the server to try again.\n');
-        } else {
-          console.log('\n⚠️  No RSD info entered — iOS screenshots will not work.');
-          console.log('   Restart the server to try again.\n');
-        }
-        rl.close();
-        resolve();
-      });
-    });
+    console.log('⚠️  Invalid RSD values. Expected <addr> <port>, e.g. fd17:e13c:9ab0::1 56673\n');
   }
 }
 
