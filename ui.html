@@ -146,15 +146,21 @@
 
   <script>
     const SERVER_URL = 'http://localhost:3000';
-    const FETCH_TIMEOUT = 10000; // 10 second timeout for fetch requests
+    const FETCH_TIMEOUT = 15000; // covers the server's 8s parallel device detection
+    const SCREENSHOT_FETCH_TIMEOUT = 35000; // capture itself has a 30s budget server-side
     const DEBUG = false; // flip to true for per-stage timing logs
 
-    // Fetch with timeout wrapper
-    async function fetchWithTimeout(url, options = {}) {
+    // Fetch with timeout wrapper. Always sends the X-Figma-Plugin header the
+    // server requires (its guard against drive-by requests from web pages).
+    async function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT) {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
       try {
-        const response = await fetch(url, { ...options, signal: controller.signal });
+        const response = await fetch(url, {
+          ...options,
+          headers: { 'X-Figma-Plugin': '1', ...(options.headers || {}) },
+          signal: controller.signal
+        });
         clearTimeout(timeoutId);
         return response;
       } catch (error) {
@@ -252,11 +258,10 @@
     function startProgress(btn) {
       const stages = ['Capturing', 'Processing', 'Transferring'];
       let stageIndex = 0;
-      let dots = 0;
+      let dots = 1;
 
       const update = () => {
-        dots = (dots + 1) % 4;
-        btn.textContent = stages[stageIndex] + '.'.repeat(dots || 1);
+        btn.textContent = stages[stageIndex] + '.'.repeat(dots);
       };
 
       update();
@@ -266,7 +271,7 @@
           dots = 1;
           stageIndex = Math.min(stageIndex + 1, stages.length - 1);
         }
-        btn.textContent = stages[stageIndex] + '.'.repeat(dots);
+        update();
       }, 400);
     }
 
@@ -292,7 +297,7 @@
 
         // Take screenshot (resolution is included in headers)
         let fetchStart = Date.now();
-        const response = await fetchWithTimeout(`${SERVER_URL}/screenshot`);
+        const response = await fetchWithTimeout(`${SERVER_URL}/screenshot`, {}, SCREENSHOT_FETCH_TIMEOUT);
         if (DEBUG) console.log(`[UI] Network fetch: ${Date.now() - fetchStart}ms`);
 
         if (!response.ok) {

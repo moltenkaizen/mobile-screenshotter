@@ -15,6 +15,7 @@ const PORT = 3000;
 const BASE_DENSITY = 160; // Android baseline density (mdpi)
 const QUICK_TIMEOUT = 15000;       // fast device queries (adb/pymd3 info)
 const SCREENSHOT_TIMEOUT = 30000;  // screenshot capture may be slower
+const DETECT_TIMEOUT = 8000;       // detection probes only — kept under the plugin's fetch timeout
 
 function makeTempPath() {
   return path.join(os.tmpdir(), `mobile-screenshot-${crypto.randomUUID()}.png`);
@@ -62,13 +63,19 @@ if (iosRSDConfig.port && !isValidRSDPort(iosRSDConfig.port)) {
   iosRSDConfig.port = null;
 }
 
-// Store detected device info (set once at startup)
+// Store detected device info (refreshed on each /device and /screenshot request)
 let connectedDevice = {
   type: null,        // 'android', 'ios', or null
   connected: false,
   id: null,
   info: null         // Full device info for iOS (from usbmux list)
 };
+
+// Last orientation observed from an actual iOS capture. pymobiledevice3 gives
+// us no live rotation query, so /resolution reports this instead of always
+// claiming portrait; it's updated every time /screenshot infers orientation
+// from the PNG dimensions.
+let lastIOSOrientation = { isLandscape: false, rotation: 0 };
 
 // Map iPhone ProductType to device specs
 const iPhoneSpecs = {
@@ -182,9 +189,22 @@ app.use(cors({
     if (!origin || origin === 'null') return cb(null, true);
     return cb(new Error('Origin not allowed by CORS'));
   },
+  allowedHeaders: ['X-Figma-Plugin', 'Content-Type'],
   exposedHeaders: ['X-Resolution']
 }));
 app.use(express.json());
+
+// A sandboxed iframe on any website also produces `Origin: null`, so the CORS
+// gate alone doesn't stop drive-by requests. Require a custom header that only
+// the plugin sends: custom headers force a CORS preflight, which <img>/<script>
+// tags and no-cors iframe fetches can't complete.
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next(); // let cors() answer preflights
+  if (req.get('X-Figma-Plugin') !== '1') {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  next();
+});
 
 // Tracks whether the underlying CLI was missing (vs. installed but no device).
 // Used at startup to give the user a clearer hint about what to install.
@@ -197,14 +217,21 @@ function isCommandMissing(err) {
   return text.includes('command not found') || text.includes('not recognized');
 }
 
-// Device type detection function (runs once at startup)
+// Device type detection. Runs at startup and again on each /device and
+// /screenshot request, so unplug/replug/device-swap is picked up without a
+// server restart. Both probes run in parallel so worst-case detection stays
+// under the plugin's fetch timeout even when a daemon cold-starts.
 async function detectAndStoreDevice() {
   detectionDiagnostics = { adbMissing: false, pymd3Missing: false };
 
-  // Try Android first
-  try {
-    const { stdout: adbOutput } = await execAsync('adb devices', { timeout: QUICK_TIMEOUT });
-    const androidDevices = adbOutput.split('\n')
+  const [adbResult, iosResult] = await Promise.allSettled([
+    execAsync('adb devices', { timeout: DETECT_TIMEOUT }),
+    execAsync('pymobiledevice3 usbmux list', { timeout: DETECT_TIMEOUT })
+  ]);
+
+  // Prefer Android when both are present (matches the old sequential order)
+  if (adbResult.status === 'fulfilled') {
+    const androidDevices = adbResult.value.stdout.split('\n')
       .filter(line => line.trim() && !line.includes('List of devices'))
       .filter(line => line.includes('\tdevice'));
 
@@ -218,18 +245,15 @@ async function detectAndStoreDevice() {
       };
       return;
     }
-  } catch (e) {
-    if (isCommandMissing(e)) detectionDiagnostics.adbMissing = true;
+  } else if (isCommandMissing(adbResult.reason)) {
+    detectionDiagnostics.adbMissing = true;
   }
 
-  // Try iOS using pymobiledevice3
-  try {
-    const { stdout: iosOutput } = await execAsync('pymobiledevice3 usbmux list', { timeout: QUICK_TIMEOUT });
-    // Parse JSON output from pymobiledevice3
-    const devices = JSON.parse(iosOutput);
-    if (devices && devices.length > 0) {
-      // Filter to USB-connected devices only
-      const usbDevice = devices.find(d => d.ConnectionType === 'USB');
+  if (iosResult.status === 'fulfilled') {
+    try {
+      // Parse JSON output from pymobiledevice3, USB-connected devices only
+      const devices = JSON.parse(iosResult.value.stdout);
+      const usbDevice = devices && devices.find(d => d.ConnectionType === 'USB');
       if (usbDevice) {
         connectedDevice = {
           type: 'ios',
@@ -239,13 +263,23 @@ async function detectAndStoreDevice() {
         };
         return;
       }
-    }
-  } catch (e) {
-    if (isCommandMissing(e)) detectionDiagnostics.pymd3Missing = true;
+    } catch (e) { /* unparseable output — treat as no iOS device */ }
+  } else if (isCommandMissing(iosResult.reason)) {
+    detectionDiagnostics.pymd3Missing = true;
   }
 
   // No device found
   connectedDevice = { type: null, connected: false, id: null, info: null };
+}
+
+// Single-flight wrapper: concurrent requests share one in-progress detection
+// instead of racing their own probes against each other.
+let detectInFlight = null;
+function runDetectOnce() {
+  if (!detectInFlight) {
+    detectInFlight = detectAndStoreDevice().finally(() => { detectInFlight = null; });
+  }
+  return detectInFlight;
 }
 
 // Check if iOS tunnel RSD params are configured
@@ -287,11 +321,8 @@ app.get('/health', (req, res) => {
 
 // Check if device is connected (Android or iOS)
 app.get('/device', async (req, res) => {
-  // Re-run detection if we previously saw no device — supports plugging in
-  // after server start without requiring a restart.
-  if (!connectedDevice.connected) {
-    await detectAndStoreDevice();
-  }
+  // Always re-detect so unplug/replug/device-swap is noticed without a restart.
+  await runDetectOnce();
 
   if (!connectedDevice.connected) {
     return res.json({ connected: false, message: 'No device connected' });
@@ -362,14 +393,21 @@ app.get('/resolution', async (req, res) => {
         return res.status(500).json({ error: 'iOS device missing info' });
       }
       const resolutionInfo = getIOSResolution(connectedDevice.info.ProductType);
+      // iPhoneSpecs are stored portrait; report the orientation last observed
+      // by /screenshot instead of always claiming portrait.
+      let { physical, logical } = resolutionInfo;
+      if (lastIOSOrientation.isLandscape) {
+        physical = { width: physical.height, height: physical.width };
+        logical = { width: logical.height, height: logical.width };
+      }
       res.json({
         success: true,
-        physical: resolutionInfo.physical,
-        logical: resolutionInfo.logical,
+        physical,
+        logical,
         density: resolutionInfo.scale * BASE_DENSITY,
         scale: resolutionInfo.scale,
-        rotation: 0,
-        isLandscape: false
+        rotation: lastIOSOrientation.rotation,
+        isLandscape: lastIOSOrientation.isLandscape
       });
     } else {
       res.status(400).json({ error: 'Unknown device type' });
@@ -385,11 +423,9 @@ app.get('/resolution', async (req, res) => {
 
 // Take screenshot endpoint
 app.get('/screenshot', async (req, res) => {
-  // Re-run detection if we previously saw no device — supports plugging in
-  // after server start without requiring a restart.
-  if (!connectedDevice.connected) {
-    await detectAndStoreDevice();
-  }
+  // Always re-detect so we never capture against a stale device entry (which
+  // could silently report the wrong model's dimensions after a device swap).
+  await runDetectOnce();
 
   if (!connectedDevice.connected) {
     return res.status(400).json({ error: 'No device connected' });
@@ -447,6 +483,7 @@ app.get('/screenshot', async (req, res) => {
           isLandscape = true;
           rotation = 1; // can't distinguish left/right from dims alone
         }
+        lastIOSOrientation = { isLandscape, rotation };
       } catch (_) { /* detection failed, fall through as portrait */ }
 
       resolutionData = {
