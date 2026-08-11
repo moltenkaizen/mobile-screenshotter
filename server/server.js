@@ -11,12 +11,17 @@ const { imageSize } = require('image-size');
 
 const execAsync = promisify(exec);
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000; // override mainly for testing; the plugin expects 3000
 const BASE_DENSITY = 160; // Android baseline density (mdpi)
 const QUICK_TIMEOUT = 15000;       // fast device queries (adb/pymd3 info)
 const SCREENSHOT_TIMEOUT = 30000;  // screenshot capture may be slower
 const DETECT_TIMEOUT = 8000;       // detection probes only — kept under the plugin's fetch timeout
 const TUNNELD_PORT = 49151;        // default port of `pymobiledevice3 remote tunneld`
+const DETECT_TTL = 5000;           // reuse device-detection results this fresh (ms)
+
+// Per-stage timing logs, same idea as the DEBUG flags in ui.html and code.ts.
+// Enable with:  DEBUG=1 npm start
+const DEBUG = process.env.DEBUG === '1';
 
 function makeTempPath() {
   return path.join(os.tmpdir(), `mobile-screenshot-${crypto.randomUUID()}.png`);
@@ -298,11 +303,31 @@ async function detectAndStoreDevice() {
 // Single-flight wrapper: concurrent requests share one in-progress detection
 // instead of racing their own probes against each other.
 let detectInFlight = null;
+let lastDetectAt = 0;
 function runDetectOnce() {
   if (!detectInFlight) {
-    detectInFlight = detectAndStoreDevice().finally(() => { detectInFlight = null; });
+    const start = Date.now();
+    detectInFlight = detectAndStoreDevice()
+      .then(() => {
+        lastDetectAt = Date.now();
+        if (DEBUG) console.log(`[SERVER] device detection: ${lastDetectAt - start}ms (${connectedDevice.type || 'none'})`);
+      })
+      .finally(() => { detectInFlight = null; });
   }
   return detectInFlight;
+}
+
+// TTL cache over detection: skip the probes (an adb call plus a Python CLI
+// launch, ~0.5-1s) when the last result is fresh. Unplug/replug/device-swap
+// is still caught — nobody swaps phones in under DETECT_TTL — but a
+// screenshot right after the plugin's own status check pays nothing.
+async function ensureFreshDevice() {
+  const age = Date.now() - lastDetectAt;
+  if (lastDetectAt && age < DETECT_TTL) {
+    if (DEBUG) console.log(`[SERVER] device detection: cache hit (${age}ms old)`);
+    return;
+  }
+  await runDetectOnce();
 }
 
 // Check if iOS tunnel RSD params are configured
@@ -354,8 +379,8 @@ app.get('/health', (req, res) => {
 
 // Check if device is connected (Android or iOS)
 app.get('/device', async (req, res) => {
-  // Always re-detect so unplug/replug/device-swap is noticed without a restart.
-  await runDetectOnce();
+  // Re-detect (TTL-cached) so unplug/replug/swap is noticed without a restart.
+  await ensureFreshDevice();
 
   if (!connectedDevice.connected) {
     return res.json({ connected: false, message: 'No device connected' });
@@ -456,9 +481,10 @@ app.get('/resolution', async (req, res) => {
 
 // Take screenshot endpoint
 app.get('/screenshot', async (req, res) => {
-  // Always re-detect so we never capture against a stale device entry (which
-  // could silently report the wrong model's dimensions after a device swap).
-  await runDetectOnce();
+  const requestStart = Date.now();
+  // Re-detect (TTL-cached) so we never capture against a stale device entry
+  // (which could silently report the wrong model's dimensions after a swap).
+  await ensureFreshDevice();
 
   if (!connectedDevice.connected) {
     return res.status(400).json({ error: 'No device connected' });
@@ -467,6 +493,7 @@ app.get('/screenshot', async (req, res) => {
   const tempFile = makeTempPath();
 
   try {
+    let start = Date.now();
     if (connectedDevice.type === 'android') {
       // Stream screenshot directly from device (faster than file-based approach)
       await execAsync(`adb exec-out screencap -p > "${tempFile}"`, { timeout: SCREENSHOT_TIMEOUT, maxBuffer: 50 * 1024 * 1024 });
@@ -490,11 +517,15 @@ app.get('/screenshot', async (req, res) => {
         throw error;
       }
     }
+    if (DEBUG) console.log(`[SERVER] capture (${connectedDevice.type}): ${Date.now() - start}ms`);
 
+    start = Date.now();
     const imageBuffer = fs.readFileSync(tempFile);
     fs.unlinkSync(tempFile);
+    if (DEBUG) console.log(`[SERVER] read+cleanup: ${Date.now() - start}ms (${(imageBuffer.length / 1024).toFixed(0)} KB)`);
 
     // Get resolution data to include in headers (saves separate fetch)
+    start = Date.now();
     let resolutionData = null;
     if (connectedDevice.type === 'ios') {
       // iOS: Use cached device specs (instant) and infer orientation from
@@ -532,6 +563,7 @@ app.get('/screenshot', async (req, res) => {
         resolutionData = await getAndroidResolution();
       } catch (e) { /* resolution fetch failed, client can fallback */ }
     }
+    if (DEBUG) console.log(`[SERVER] resolution data: ${Date.now() - start}ms`);
 
     // Send resolution as JSON header, image as raw binary
     res.set('Content-Type', 'image/png');
@@ -539,6 +571,7 @@ app.get('/screenshot', async (req, res) => {
       res.set('X-Resolution', JSON.stringify(resolutionData));
     }
     res.send(imageBuffer);
+    if (DEBUG) console.log(`[SERVER] ========== total /screenshot: ${Date.now() - requestStart}ms ==========`);
 
   } catch (error) {
     console.error('Screenshot error:', error);
@@ -557,7 +590,7 @@ app.get('/screenshot', async (req, res) => {
 // Prompt for iOS RSD configuration if needed
 async function promptForIOSConfig() {
   console.log('🔍 Detecting connected devices...\n');
-  await detectAndStoreDevice();
+  await runDetectOnce();
 
   if (!connectedDevice.connected) {
     console.log('❌ No device detected');
