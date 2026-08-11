@@ -2,6 +2,8 @@
 
 Opus-level code review of a Figma plugin that captures mobile device screenshots (Android via ADB, iOS via pymobiledevice3) and places them on the Figma canvas. The project works well and has been through several optimization rounds. This review identifies bugs, security concerns, and quality improvements.
 
+> **Historical — resolved.** The high-priority findings here (RSD command injection, temp file race, rotation parsing) were fixed in commits `2dfeb5a`, `b80d38d`, and `892bbea`. This document describes the pre-hardening code; see `docs/ultrareview04-22-26.md` for the current review.
+
 > **Note:** This document is findings-only. No fixes have been implemented.
 
 ---

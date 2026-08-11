@@ -189,7 +189,7 @@ mobile-screenshotter/
 ├── package.json       # Plugin dependencies
 ├── server/            # Local server
 │   ├── server.js      # Express server with ADB + pymobiledevice3 integration
-│   └── package.json   # Server dependencies (includes sharp for image optimization)
+│   └── package.json   # Server dependencies (cors, express, image-size)
 └── README.md          # This file
 ```
 
@@ -197,14 +197,13 @@ mobile-screenshotter/
 
 1. **Local Server**: Express server listens on `localhost:3000` and executes device commands
 2. **Device Detection**: Server detects Android (via ADB) or iOS (via pymobiledevice3) at startup
-3. **iOS Tunnel**: For iOS devices, the server automatically starts and manages the `pymobiledevice3` tunnel; it is shut down cleanly when the server stops
+3. **iOS Tunnel**: For iOS devices, you start the `pymobiledevice3` tunnel yourself in a separate terminal (`sudo pymobiledevice3 remote start-tunnel`) and paste its `--rsd` line into the server prompt. An earlier version managed the tunnel automatically, but that turned out to be buggy — running it separately is cleaner.
 4. **Figma Plugin UI**: Makes HTTP requests to the local server to trigger screenshots
 5. **Screenshot Capture**:
    - Android: Uses ADB to capture and pull screenshot
    - iOS: Uses pymobiledevice3 with tunnel connection
-6. **Optimization**: Server converts PNG to JPEG (85% quality) for 93% file size reduction
-7. **Transfer**: Returns screenshot as binary data to the plugin
-8. **Plugin**: Creates frame in Figma with the screenshot at logical or physical resolution
+6. **Transfer**: Returns the PNG as raw binary data to the plugin, with resolution info in an `X-Resolution` header
+7. **Plugin**: Creates frame in Figma with the screenshot at logical or physical resolution
 
 ## Future Enhancements
 

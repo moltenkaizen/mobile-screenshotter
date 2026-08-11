@@ -6,6 +6,3 @@ node_modules
 out/
 dist/
 code.js
-
-# Server temp files
-server/temp_screenshot.png

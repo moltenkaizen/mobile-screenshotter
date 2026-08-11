@@ -1,5 +1,7 @@
 # Mobile Screenshotter — Code Review
 
+> **Historical — resolved.** The headline findings here (open CORS, shared temp file, RSD command injection, missing loopback bind) were fixed in commits `2dfeb5a` and `b80d38d`. This document describes the pre-hardening code; see `docs/ultrareview04-22-26.md` for the current review.
+
 Independent expert review of the Figma plugin and local Express server. The code is small and focused, with obvious care taken over the happy path. Most findings below are around trust boundaries (the server is reachable by anything on `localhost`), error paths, and a handful of dead or incorrect bits that have accumulated.
 
 A prior `OPUS_REVIEW.md` exists in the tree; where this review overlaps, the verdict column notes it. Where it disagrees (e.g. the `allowedDomains: ["none"]` claim), this document takes the opposing position.
