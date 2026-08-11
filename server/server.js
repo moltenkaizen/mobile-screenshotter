@@ -17,7 +17,6 @@ const QUICK_TIMEOUT = 15000;       // fast device queries (adb/pymd3 info)
 const SCREENSHOT_TIMEOUT = 30000;  // screenshot capture may be slower
 const DETECT_TIMEOUT = 8000;       // detection probes only — kept under the plugin's fetch timeout
 const TUNNELD_PORT = 49151;        // default port of `pymobiledevice3 remote tunneld`
-const DETECT_TTL = 5000;           // reuse device-detection results this fresh (ms)
 
 // Per-stage timing logs, same idea as the DEBUG flags in ui.html and code.ts.
 // Enable with:  DEBUG=1 npm start
@@ -303,31 +302,16 @@ async function detectAndStoreDevice() {
 // Single-flight wrapper: concurrent requests share one in-progress detection
 // instead of racing their own probes against each other.
 let detectInFlight = null;
-let lastDetectAt = 0;
 function runDetectOnce() {
   if (!detectInFlight) {
     const start = Date.now();
     detectInFlight = detectAndStoreDevice()
       .then(() => {
-        lastDetectAt = Date.now();
-        if (DEBUG) console.log(`[SERVER] device detection: ${lastDetectAt - start}ms (${connectedDevice.type || 'none'})`);
+        if (DEBUG) console.log(`[SERVER] device detection: ${Date.now() - start}ms (${connectedDevice.type || 'none'})`);
       })
       .finally(() => { detectInFlight = null; });
   }
   return detectInFlight;
-}
-
-// TTL cache over detection: skip the probes (an adb call plus a Python CLI
-// launch, ~0.5-1s) when the last result is fresh. Unplug/replug/device-swap
-// is still caught — nobody swaps phones in under DETECT_TTL — but a
-// screenshot right after the plugin's own status check pays nothing.
-async function ensureFreshDevice() {
-  const age = Date.now() - lastDetectAt;
-  if (lastDetectAt && age < DETECT_TTL) {
-    if (DEBUG) console.log(`[SERVER] device detection: cache hit (${age}ms old)`);
-    return;
-  }
-  await runDetectOnce();
 }
 
 // Check if iOS tunnel RSD params are configured
@@ -379,8 +363,9 @@ app.get('/health', (req, res) => {
 
 // Check if device is connected (Android or iOS)
 app.get('/device', async (req, res) => {
-  // Re-detect (TTL-cached) so unplug/replug/swap is noticed without a restart.
-  await ensureFreshDevice();
+  // Always probe: this endpoint is the plugin's explicit "check now" button,
+  // so it should report the truth, not a cache.
+  await runDetectOnce();
 
   if (!connectedDevice.connected) {
     return res.json({ connected: false, message: 'No device connected' });
@@ -479,12 +464,43 @@ app.get('/resolution', async (req, res) => {
   }
 });
 
+// Capture one screenshot from the currently-cached device into tempFile.
+// Throws on failure so the caller can re-detect and retry.
+async function captureToFile(tempFile) {
+  if (connectedDevice.type === 'android') {
+    // Stream screenshot directly from device (faster than file-based approach)
+    await execAsync(`adb exec-out screencap -p > "${tempFile}"`, { timeout: SCREENSHOT_TIMEOUT, maxBuffer: 50 * 1024 * 1024 });
+  } else if (connectedDevice.type === 'ios') {
+    if (!connectedDevice.info) throw new Error('iOS device missing info');
+    // Take screenshot using pymobiledevice3 (tunneld if running, else RSD)
+    try {
+      const cmd = await buildPymobiledevice3Command(
+        `pymobiledevice3 developer dvt screenshot "${tempFile}"`
+      );
+      await execAsync(cmd, { timeout: SCREENSHOT_TIMEOUT });
+    } catch (error) {
+      // Rewrite pymobiledevice3's own tunnel errors into an actionable hint.
+      // Match on stderr (exec errors only) so our thrown config errors —
+      // which also mention tunneld — pass through untouched.
+      if (error.stderr && (error.stderr.includes('tunneld') || error.stderr.includes('RemoteXPC') || error.stderr.includes('tunnel'))) {
+        throw new Error('iOS tunnel problem. Easiest fix: run `sudo pymobiledevice3 remote tunneld` in another terminal and retry — no server restart needed.');
+      }
+      throw error;
+    }
+  } else {
+    throw new Error('Unknown device type');
+  }
+}
+
 // Take screenshot endpoint
 app.get('/screenshot', async (req, res) => {
   const requestStart = Date.now();
-  // Re-detect (TTL-cached) so we never capture against a stale device entry
-  // (which could silently report the wrong model's dimensions after a swap).
-  await ensureFreshDevice();
+  // Trust the cached device — zero detection overhead on the happy path.
+  // A stale cache (unplug/replug/swap since the last check) makes the
+  // capture fail fast, and the catch below re-detects and retries once.
+  if (!connectedDevice.connected) {
+    await runDetectOnce();
+  }
 
   if (!connectedDevice.connected) {
     return res.status(400).json({ error: 'No device connected' });
@@ -494,28 +510,17 @@ app.get('/screenshot', async (req, res) => {
 
   try {
     let start = Date.now();
-    if (connectedDevice.type === 'android') {
-      // Stream screenshot directly from device (faster than file-based approach)
-      await execAsync(`adb exec-out screencap -p > "${tempFile}"`, { timeout: SCREENSHOT_TIMEOUT, maxBuffer: 50 * 1024 * 1024 });
-    } else if (connectedDevice.type === 'ios') {
-      if (!connectedDevice.info) {
-        return res.status(500).json({ error: 'iOS device missing info' });
-      }
-      // Take screenshot using pymobiledevice3 (tunneld if running, else RSD)
-      try {
-        const cmd = await buildPymobiledevice3Command(
-          `pymobiledevice3 developer dvt screenshot "${tempFile}"`
-        );
-        await execAsync(cmd, { timeout: SCREENSHOT_TIMEOUT });
-      } catch (error) {
-        // Rewrite pymobiledevice3's own tunnel errors into an actionable hint.
-        // Match on stderr (exec errors only) so our thrown config errors —
-        // which also mention tunneld — pass through untouched.
-        if (error.stderr && (error.stderr.includes('tunneld') || error.stderr.includes('RemoteXPC') || error.stderr.includes('tunnel'))) {
-          throw new Error('iOS tunnel problem. Easiest fix: run `sudo pymobiledevice3 remote tunneld` in another terminal and retry — no server restart needed.');
-        }
-        throw error;
-      }
+    try {
+      await captureToFile(tempFile);
+    } catch (firstError) {
+      // A capture that ran long before failing means the device was present
+      // but hung — re-detecting won't cure that, and a retry would blow the
+      // client's timeout budget. Only retry fast failures (stale cache).
+      if (Date.now() - start > 10000) throw firstError;
+      if (DEBUG) console.log(`[SERVER] capture failed after ${Date.now() - start}ms — re-detecting and retrying once`);
+      await runDetectOnce();
+      if (!connectedDevice.connected) throw firstError;
+      await captureToFile(tempFile);
     }
     if (DEBUG) console.log(`[SERVER] capture (${connectedDevice.type}): ${Date.now() - start}ms`);
 

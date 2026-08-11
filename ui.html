@@ -253,25 +253,24 @@
       errorEl.style.display = 'block';
     }
 
-    // Animated progress indicator
+    // Animated progress indicator. The label tracks the real pipeline stage
+    // (via setProgressStage); only the dots run on a timer.
     let progressInterval = null;
-    function startProgress(btn) {
-      const stages = ['Capturing', 'Processing', 'Transferring'];
-      let stageIndex = 0;
+    let progressStage = '';
+    let progressBtn = null;
+
+    function setProgressStage(label) {
+      progressStage = label;
+      if (progressBtn) progressBtn.textContent = label + '.';
+    }
+
+    function startProgress(btn, label) {
+      progressBtn = btn;
       let dots = 1;
-
-      const update = () => {
-        btn.textContent = stages[stageIndex] + '.'.repeat(dots);
-      };
-
-      update();
+      setProgressStage(label);
       progressInterval = setInterval(() => {
-        dots++;
-        if (dots > 3) {
-          dots = 1;
-          stageIndex = Math.min(stageIndex + 1, stages.length - 1);
-        }
-        update();
+        dots = dots % 3 + 1;
+        btn.textContent = progressStage + '.'.repeat(dots);
       }, 400);
     }
 
@@ -280,6 +279,7 @@
         clearInterval(progressInterval);
         progressInterval = null;
       }
+      progressBtn = null;
     }
 
     // Take screenshot
@@ -289,7 +289,7 @@
 
       errorEl.style.display = 'none';
       screenshotBtn.disabled = true;
-      startProgress(screenshotBtn);
+      startProgress(screenshotBtn, 'Capturing');
 
       try {
         const startTime = Date.now();
@@ -326,6 +326,7 @@
         }
 
         // Get raw binary directly (no base64 decode needed)
+        setProgressStage('Transferring');
         let processStart = Date.now();
         const arrayBuffer = await response.arrayBuffer();
         const bytes = new Uint8Array(arrayBuffer);

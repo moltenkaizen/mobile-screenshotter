@@ -194,7 +194,7 @@ mobile-screenshotter/
 ## How It Works
 
 1. **Local Server**: Express server listens on `localhost:3000` and executes device commands
-2. **Device Detection**: Server detects Android (via ADB) or iOS (via pymobiledevice3) at startup, and re-checks on every request — so plugging in or swapping devices doesn't require a restart
+2. **Device Detection**: Server detects Android (via ADB) or iOS (via pymobiledevice3) at startup and on every Check Connection click. Screenshots trust the cached device for speed and self-heal if it's stale: a failed capture triggers one automatic re-detect + retry, so unplugging or swapping devices never requires a restart
 3. **iOS Tunnel**: `sudo pymobiledevice3 remote tunneld` runs as a daemon that creates and manages tunnels automatically; the server detects it (checked per capture, so starting it late is fine) and passes `--tunnel <udid>` to capture commands. Fallback: run `start-tunnel` manually and paste its `--rsd` line at the server prompt. An earlier version spawned the tunnel itself, but that turned out to be buggy — keeping the sudo process separate is cleaner.
 4. **Figma Plugin UI**: Makes HTTP requests to the local server to trigger screenshots
 5. **Screenshot Capture**:
