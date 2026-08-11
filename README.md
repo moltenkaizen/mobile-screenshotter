@@ -75,11 +75,20 @@ iOS screenshots go through Apple's developer tooling, so there are more steps.
    - If that fails, use Xcode (~12-15GB download from the Mac App Store):
      Open Xcode → Window → Devices and Simulators, select your device, and wait for "Preparing device for development..." to complete
 
-4. **Start the tunnel** — required for iOS screenshots; the server will not capture without it:
+4. **Start the tunnel daemon** — required for iOS screenshots; the server will not capture without it:
+   ```bash
+   sudo pymobiledevice3 remote tunneld
+   ```
+   Run this in its own terminal and leave it running. The server finds it automatically — nothing to copy or paste, and it keeps working across device replugs and server restarts.
+
+   <details>
+   <summary>Alternative: one-shot tunnel with manual RSD paste</summary>
+
    ```bash
    sudo pymobiledevice3 remote start-tunnel
    ```
-   Run this in its own terminal and leave it running. It prints an `--rsd <addr> <port>` line you'll paste into the server prompt — note that the port changes every time the tunnel restarts.
+   This prints an `--rsd <addr> <port>` line you paste at the server's `RSD:` prompt. The port changes every time the tunnel restarts, so tunneld above is the easier option.
+   </details>
 
 5. **Verify connection:**
    ```bash
@@ -96,7 +105,7 @@ cd server
 npm start
 ```
 
-**If an iOS device is connected**, the server will prompt you for RSD values from the tunnel you started in iOS Setup step 4:
+**If an iOS device is connected** and tunneld is running (iOS Setup step 4), there's nothing to configure:
 
 ```
 🔍 Detecting connected devices...
@@ -104,24 +113,15 @@ npm start
 ✓ Detected: iPhone 15 Pro (iOS 26.x)
   Device ID: ...
 
-iOS tunnel required:
-  1. In another terminal, run:  sudo pymobiledevice3 remote start-tunnel
-  2. Paste its `--rsd <addr> <port>` line below (with or without the --rsd).
-     e.g.  --rsd fd17:e13c:9ab0::1 56673
-
-RSD: --rsd fd17:e13c:9ab0::1 56673
-
-✓ iOS tunnel configured: fd17:e13c:9ab0::1 56673
+✓ tunneld detected — iOS tunnels are managed automatically
 
 🚀 Server running on http://127.0.0.1:3000
 ```
 
-**Optional — skip the prompt** by passing RSD info directly:
+Without tunneld, the server prompts instead: press Enter after starting tunneld and it proceeds, or paste an `--rsd <addr> <port>` line from a manually-run `start-tunnel`. RSD values can also be passed up front to skip the prompt:
 ```bash
 npm start -- --rsd "fd17:e13c:9ab0::1 56673"
-```
-Or via environment variables:
-```bash
+# or
 IOS_RSD_ADDRESS=fd17:e13c:9ab0::1 IOS_RSD_PORT=56673 npm start
 ```
 
@@ -164,7 +164,8 @@ The plugin's toggle controls the size of the frame created in Figma — the imag
 
 ### "Failed to capture screenshot" (iOS)
 - Make sure your device is unlocked
-- Verify the tunnel is still running. If it died, restart the tunnel first — it prints a **new** `--rsd` port each time — then restart the server and paste the new values
+- Verify tunneld is still running; if it died, restart it and just retry — no server restart needed
+- If using the manual `start-tunnel` fallback instead: restart the tunnel first (it prints a **new** `--rsd` port each time), then restart the server and paste the new values
 - Some apps block screenshots (e.g., banking apps)
 
 ### ADB not found
@@ -194,7 +195,7 @@ mobile-screenshotter/
 
 1. **Local Server**: Express server listens on `localhost:3000` and executes device commands
 2. **Device Detection**: Server detects Android (via ADB) or iOS (via pymobiledevice3) at startup, and re-checks on every request — so plugging in or swapping devices doesn't require a restart
-3. **iOS Tunnel**: For iOS devices, you start the `pymobiledevice3` tunnel yourself in a separate terminal (`sudo pymobiledevice3 remote start-tunnel`) and paste its `--rsd` line into the server prompt. An earlier version managed the tunnel automatically, but that turned out to be buggy — running it separately is cleaner.
+3. **iOS Tunnel**: `sudo pymobiledevice3 remote tunneld` runs as a daemon that creates and manages tunnels automatically; the server detects it (checked per capture, so starting it late is fine) and passes `--tunnel <udid>` to capture commands. Fallback: run `start-tunnel` manually and paste its `--rsd` line at the server prompt. An earlier version spawned the tunnel itself, but that turned out to be buggy — keeping the sudo process separate is cleaner.
 4. **Figma Plugin UI**: Makes HTTP requests to the local server to trigger screenshots
 5. **Screenshot Capture**:
    - Android: Uses ADB to capture and pull screenshot

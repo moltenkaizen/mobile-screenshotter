@@ -16,6 +16,7 @@ const BASE_DENSITY = 160; // Android baseline density (mdpi)
 const QUICK_TIMEOUT = 15000;       // fast device queries (adb/pymd3 info)
 const SCREENSHOT_TIMEOUT = 30000;  // screenshot capture may be slower
 const DETECT_TIMEOUT = 8000;       // detection probes only — kept under the plugin's fetch timeout
+const TUNNELD_PORT = 49151;        // default port of `pymobiledevice3 remote tunneld`
 
 function makeTempPath() {
   return path.join(os.tmpdir(), `mobile-screenshot-${crypto.randomUUID()}.png`);
@@ -33,6 +34,28 @@ function isValidRSDAddress(addr) {
 function isValidRSDPort(port) {
   const n = Number(port);
   return Number.isInteger(n) && n >= 1 && n <= 65535;
+}
+
+// iOS UDIDs are hex with dashes (e.g. 00008120-001A2B3C4D5E6F78). Validated
+// before interpolation into the pymobiledevice3 command, same as RSD params.
+function isValidUDID(udid) {
+  return typeof udid === 'string' && /^[0-9A-Fa-f-]{8,40}$/.test(udid);
+}
+
+// True if `pymobiledevice3 remote tunneld` is reachable. Any HTTP response
+// (whatever the status) means the daemon owns the port; connection refused /
+// timeout means it isn't running.
+async function isTunneldRunning() {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 1500);
+  try {
+    await fetch(`http://127.0.0.1:${TUNNELD_PORT}/`, { signal: controller.signal });
+    return true;
+  } catch (e) {
+    return false;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // Store RSD params in memory (set via env vars, --rsd flag, or interactive prompt)
@@ -292,15 +315,25 @@ function getIOSRSDParams() {
       configured: false,
       address: null,
       port: null,
-      instructions: 'iOS tunnel not configured. Please restart server to enter RSD values.'
+      instructions: 'iOS tunnel not configured. Run `sudo pymobiledevice3 remote tunneld` in another terminal and retry — no server restart needed. (Or restart the server and paste an --rsd line.)'
     };
   }
 
   return { configured: true, address, port };
 }
 
-// Build pymobiledevice3 command with RSD params
-function buildPymobiledevice3Command(baseCommand) {
+// Build pymobiledevice3 command. Prefers tunneld (`--tunnel <udid>`, tunnels
+// managed automatically); falls back to manually-entered RSD params. tunneld
+// is re-checked per capture, so starting it after server launch just works.
+async function buildPymobiledevice3Command(baseCommand) {
+  if (await isTunneldRunning()) {
+    const udid = connectedDevice.id;
+    if (!isValidUDID(udid)) {
+      throw new Error('Unrecognized iOS device identifier — reconnect the device and retry.');
+    }
+    return `${baseCommand} --tunnel ${udid}`;
+  }
+
   const rsd = getIOSRSDParams();
 
   if (!rsd.configured) {
@@ -441,20 +474,18 @@ app.get('/screenshot', async (req, res) => {
       if (!connectedDevice.info) {
         return res.status(500).json({ error: 'iOS device missing info' });
       }
-      // Take screenshot using pymobiledevice3 with RSD params
+      // Take screenshot using pymobiledevice3 (tunneld if running, else RSD)
       try {
-        const cmd = buildPymobiledevice3Command(
+        const cmd = await buildPymobiledevice3Command(
           `pymobiledevice3 developer dvt screenshot "${tempFile}"`
         );
         await execAsync(cmd, { timeout: SCREENSHOT_TIMEOUT });
       } catch (error) {
-        // If error mentions tunnel, provide helpful message
-        if (error.message && (error.message.includes('tunneld') || error.message.includes('RemoteXPC'))) {
-          const rsd = getIOSRSDParams();
-          throw new Error(rsd.configured ?
-            'Tunnel not running. Start it with: sudo pymobiledevice3 remote start-tunnel' :
-            rsd.instructions
-          );
+        // Rewrite pymobiledevice3's own tunnel errors into an actionable hint.
+        // Match on stderr (exec errors only) so our thrown config errors —
+        // which also mention tunneld — pass through untouched.
+        if (error.stderr && (error.stderr.includes('tunneld') || error.stderr.includes('RemoteXPC') || error.stderr.includes('tunnel'))) {
+          throw new Error('iOS tunnel problem. Easiest fix: run `sudo pymobiledevice3 remote tunneld` in another terminal and retry — no server restart needed.');
         }
         throw error;
       }
@@ -568,7 +599,13 @@ async function promptForIOSConfig() {
     console.log(`✓ Detected: ${modelName} (iOS ${connectedDevice.info.ProductVersion})`);
     console.log(`  Device ID: ${connectedDevice.info.Identifier}\n`);
 
-    // --rsd flag or env var already populated iosRSDConfig — skip everything
+    // tunneld manages tunnels automatically — nothing to configure
+    if (await isTunneldRunning()) {
+      console.log('✓ tunneld detected — iOS tunnels are managed automatically\n');
+      return;
+    }
+
+    // --rsd flag or env var already populated iosRSDConfig — skip the prompt
     if (iosRSDConfig.address) {
       console.log(`✓ iOS tunnel configured: ${iosRSDConfig.address}:${iosRSDConfig.port}\n`);
       return;
@@ -588,22 +625,31 @@ function askOnce(prompt) {
   });
 }
 
-// Ask for an RSD address/port from a user-managed tunnel. We intentionally
-// don't auto-spawn `sudo pymobiledevice3 remote start-tunnel` ourselves —
-// letting the user run it in a separate terminal avoids the TTY/password
-// kludge and keeps this process unprivileged.
+// A tunnel is needed for iOS capture, run by the user in a separate terminal.
+// We intentionally don't auto-spawn a sudo process ourselves — that avoids the
+// TTY/password kludge and keeps this process unprivileged. Two user options:
+//   A (recommended): `sudo pymobiledevice3 remote tunneld` — a daemon that
+//     creates and manages tunnels automatically; we just press Enter here.
+//   B: `sudo pymobiledevice3 remote start-tunnel` — a single tunnel whose
+//     `--rsd <addr> <port>` line gets pasted at this prompt.
 async function interactiveTunnelSetup() {
-  console.log('iOS tunnel required:');
-  console.log('  1. In another terminal, run:  sudo pymobiledevice3 remote start-tunnel');
-  console.log('  2. Paste its `--rsd <addr> <port>` line below (with or without the --rsd).');
+  console.log('iOS tunnel required — two options:');
+  console.log('  A (recommended): in another terminal, run:  sudo pymobiledevice3 remote tunneld');
+  console.log('     then press Enter here — the server finds it automatically.');
+  console.log('  B: in another terminal, run:  sudo pymobiledevice3 remote start-tunnel');
+  console.log('     then paste its `--rsd <addr> <port>` line below (with or without the --rsd).');
   console.log('     e.g.  --rsd fd17:e13c:9ab0::1 56673');
   console.log('');
 
   while (true) {
-    const answer = (await askOnce('RSD: ')).trim();
+    const answer = (await askOnce('RSD (or Enter to re-check tunneld): ')).trim();
 
     if (answer === '') {
-      console.log('⚠️  No input. Paste the --rsd line from your tunnel, or Ctrl+C to abort.\n');
+      if (await isTunneldRunning()) {
+        console.log('\n✓ tunneld detected — iOS tunnels are managed automatically\n');
+        return;
+      }
+      console.log(`⚠️  tunneld not reachable on 127.0.0.1:${TUNNELD_PORT}. Start it and press Enter again, or paste an --rsd line.\n`);
       continue;
     }
 
@@ -628,12 +674,14 @@ async function startServer() {
   // Bind to loopback explicitly — the plugin connects via localhost, and
   // binding to 0.0.0.0 would expose device control + screenshots to anyone
   // on the same network.
-  app.listen(PORT, '127.0.0.1', () => {
+  app.listen(PORT, '127.0.0.1', async () => {
     process.stdout.write('\n'); // ensure clean line after any tunnel output
     console.log(`🚀 Server running on http://127.0.0.1:${PORT}`);
 
     const rsd = getIOSRSDParams();
-    if (rsd.configured) {
+    if (await isTunneldRunning()) {
+      console.log('✓ iOS tunnels: managed by tunneld');
+    } else if (rsd.configured) {
       console.log(`✓ iOS tunnel active: ${rsd.address} ${rsd.port}`);
     } else if (connectedDevice.type === 'ios') {
       console.log(`⚠️  iOS tunnel not configured — screenshots will fail`);
