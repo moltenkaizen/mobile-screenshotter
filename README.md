@@ -2,63 +2,21 @@
 
 Figma plugin with local Express server to capture screenshots from Android and iOS devices and insert them directly into your Figma file.
 
-## iOS Requirements
+Runs on macOS (the iOS path is macOS-only in practice; Android capture may work elsewhere but these instructions assume macOS). You only need to complete **one** platform section below — Android or iOS. Android is a two-minute setup; iOS takes noticeably longer.
 
-iOS support requires several steps to enable developer features:
+## Prerequisites (everyone)
 
-### Prerequisites:
-- ⚠️ **Xcode** (~12-15GB download) - Required for DeveloperDiskImage mounting
-- **pymobiledevice3** - Python tool for iOS device communication
-- **Developer Mode** enabled on iOS device (iOS 16+)
-
-### Setup Steps:
-
-1. **Install Xcode** from the Mac App Store
-
-2. **Enable Developer Mode on iPhone/iPad:**
-   - Settings → Privacy & Security → Developer Mode → Enable
-   - Device will restart
-
-3. **Mount DeveloperDiskImage via Xcode:**
-   - Connect your iPhone/iPad via USB
-   - Open Xcode → Window → Devices and Simulators
-   - Select your device and wait for "Preparing device for development..." to complete
-   - Trust the computer when prompted
-   - *Note: This mounts the DeveloperDiskImage which enables developer features like screenshot capture*
-
-4. **Install pymobiledevice3:**
-   ```bash
-   pipx install pymobiledevice3
-   # or: pip3 install pymobiledevice3
-   ```
-
-5. **iOS tunnel** (required for iOS 17+): you run this yourself in a separate terminal:
-   ```bash
-   sudo pymobiledevice3 remote start-tunnel
-   ```
-   Leave it running, then paste its `--rsd <addr> <port>` output into the server prompt when you start the server.
-
-## Prerequisites
-
-1. **Node.js** - Install from [nodejs.org](https://nodejs.org/)
-2. **ADB (Android Debug Bridge)** - Usually comes with Android Studio, or install standalone:
-   ```bash
-   # macOS
-   brew install android-platform-tools
-
-   # Or download from: https://developer.android.com/tools/releases/platform-tools
-   ```
-3. **Android Device** with USB debugging enabled:
-   - Go to Settings → About Phone → Tap "Build Number" 7 times
-   - Go to Settings → Developer Options → Enable "USB Debugging"
+1. **Node.js** (v18 or newer) - Install from [nodejs.org](https://nodejs.org/)
+2. **Figma Desktop App** - required to load a development plugin
 
 ## Setup
 
-### 1. Install Plugin Dependencies
+### 1. Build the Plugin
 ```bash
 npm install
 npm run build
 ```
+This generates `code.js`, which is not checked in — the plugin won't load without this step.
 
 ### 2. Install Server Dependencies
 ```bash
@@ -72,6 +30,63 @@ npm install
 3. Select the `manifest.json` file from this folder
 4. Plugin will appear in: Menu → Plugins → Development → Mobile Screenshotter
 
+## Android Setup (the quick path)
+
+1. **Install ADB (Android Debug Bridge)** - Usually comes with Android Studio, or install standalone:
+   ```bash
+   # macOS
+   brew install android-platform-tools
+
+   # Or download from: https://developer.android.com/tools/releases/platform-tools
+   ```
+2. **Enable USB debugging** on your device:
+   - Go to Settings → About Phone → Tap "Build Number" 7 times
+   - Go to Settings → Developer Options → Enable "USB Debugging"
+3. **Plug in via USB**, unlock the device, and allow USB debugging when prompted
+4. **Verify connection:**
+   ```bash
+   adb devices
+   ```
+   Should show your device listed
+
+> With multiple Android devices attached, the server uses the first one `adb devices` lists.
+
+## iOS Setup (the longer path)
+
+iOS screenshots go through Apple's developer tooling, so there are more steps.
+
+1. **Install pymobiledevice3** (Python tool for iOS device communication):
+   ```bash
+   pipx install pymobiledevice3
+   # or: pip3 install pymobiledevice3
+   ```
+
+2. **Enable Developer Mode on iPhone/iPad** (iOS 16+):
+   - Settings → Privacy & Security → Developer Mode → Enable
+   - Device will restart
+
+3. **Mount the DeveloperDiskImage** (enables developer features like screenshot capture):
+   - Connect your iPhone/iPad via USB and trust the computer when prompted
+   - Try the lightweight route first:
+     ```bash
+     pymobiledevice3 mounter auto-mount
+     ```
+     On iOS 17+ this downloads and mounts a personalized image without needing Xcode.
+   - If that fails, use Xcode (~12-15GB download from the Mac App Store):
+     Open Xcode → Window → Devices and Simulators, select your device, and wait for "Preparing device for development..." to complete
+
+4. **Start the tunnel** — required for iOS screenshots; the server will not capture without it:
+   ```bash
+   sudo pymobiledevice3 remote start-tunnel
+   ```
+   Run this in its own terminal and leave it running. It prints an `--rsd <addr> <port>` line you'll paste into the server prompt — note that the port changes every time the tunnel restarts.
+
+5. **Verify connection:**
+   ```bash
+   pymobiledevice3 usbmux list
+   ```
+   Should show your device details in JSON format
+
 ## Usage
 
 ### 1. Start the Server
@@ -81,7 +96,7 @@ cd server
 npm start
 ```
 
-**If an iOS device is connected**, the server will prompt you for RSD values from a tunnel you've started separately:
+**If an iOS device is connected**, the server will prompt you for RSD values from the tunnel you started in iOS Setup step 4:
 
 ```
 🔍 Detecting connected devices...
@@ -110,37 +125,19 @@ Or via environment variables:
 IOS_RSD_ADDRESS=fd17:e13c:9ab0::1 IOS_RSD_PORT=56673 npm start
 ```
 
-### 2. Connect Your Device
-
-**For Android:**
-1. Plug in your Android device via USB
-2. Unlock your device
-3. Allow USB debugging when prompted
-4. Verify connection:
-   ```bash
-   adb devices
-   ```
-   Should show your device listed
-
-**For iOS:**
-1. Complete the iOS Requirements steps above (pymobiledevice3, Developer Mode, DeveloperDiskImage mounting)
-2. In a separate terminal, start the tunnel (needs sudo, leave it running):
-   ```bash
-   sudo pymobiledevice3 remote start-tunnel
-   ```
-3. Run `npm start` and paste the tunnel's `--rsd <addr> <port>` output at the prompt
-4. Verify connection:
-   ```bash
-   pymobiledevice3 usbmux list
-   ```
-   Should show your device details in JSON format
-
-### 3. Use the Plugin
+### 2. Use the Plugin
 1. Open any Figma file
 2. Run the plugin: Menu → Plugins → Development → Mobile Screenshotter
-3. The plugin will show connection status
+3. The plugin shows connection status — it's fine to plug your device in after starting the server; just click "Check Connection"
 4. Click "Take Screenshot"
 5. Screenshot appears on your canvas!
+
+### Physical vs Logical resolution
+
+The plugin's toggle controls the size of the frame created in Figma — the image itself is identical either way:
+
+- **Logical** (default): frame sized in points/dp, e.g. 393×852 for an iPhone 15 Pro. Matches the sizes you design at, so screenshots drop in at the same scale as your mockups.
+- **Physical**: frame sized in raw pixels, e.g. 1179×2556 for the same phone. Use this when you want the screenshot at native capture resolution.
 
 ## Troubleshooting
 
@@ -156,7 +153,7 @@ IOS_RSD_ADDRESS=fd17:e13c:9ab0::1 IOS_RSD_PORT=56673 npm start
 
 ### "No device connected" (iOS)
 - Make sure Developer Mode is enabled on your iPhone/iPad
-- Verify DeveloperDiskImage is mounted (open Xcode → Devices and Simulators, or use `pymobiledevice3 mounter auto-mount`)
+- Verify DeveloperDiskImage is mounted: `pymobiledevice3 mounter auto-mount` (or Xcode → Devices and Simulators)
 - Verify device shows up: `pymobiledevice3 usbmux list`
 - Click "Check Connection" in the plugin after plugging in your device
 
@@ -167,11 +164,11 @@ IOS_RSD_ADDRESS=fd17:e13c:9ab0::1 IOS_RSD_PORT=56673 npm start
 
 ### "Failed to capture screenshot" (iOS)
 - Make sure your device is unlocked
-- Verify the tunnel is still running (if it timed out, restart the server)
+- Verify the tunnel is still running. If it died, restart the tunnel first — it prints a **new** `--rsd` port each time — then restart the server and paste the new values
 - Some apps block screenshots (e.g., banking apps)
 
 ### ADB not found
-- Install Android Platform Tools (see Prerequisites)
+- Install Android Platform Tools (see Android Setup)
 - Add ADB to your PATH:
   ```bash
   # macOS/Linux - Add to ~/.zshrc or ~/.bashrc
@@ -196,7 +193,7 @@ mobile-screenshotter/
 ## How It Works
 
 1. **Local Server**: Express server listens on `localhost:3000` and executes device commands
-2. **Device Detection**: Server detects Android (via ADB) or iOS (via pymobiledevice3) at startup
+2. **Device Detection**: Server detects Android (via ADB) or iOS (via pymobiledevice3) at startup, and re-checks on every request — so plugging in or swapping devices doesn't require a restart
 3. **iOS Tunnel**: For iOS devices, you start the `pymobiledevice3` tunnel yourself in a separate terminal (`sudo pymobiledevice3 remote start-tunnel`) and paste its `--rsd` line into the server prompt. An earlier version managed the tunnel automatically, but that turned out to be buggy — running it separately is cleaner.
 4. **Figma Plugin UI**: Makes HTTP requests to the local server to trigger screenshots
 5. **Screenshot Capture**:
